@@ -1,19 +1,37 @@
 import os
 import json
+
 from io import BytesIO
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 
-from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, Border, Side
+from openpyxl.styles import (
+    Font,
+    Alignment,
+    Border,
+    Side
+)
 
 from pypdf import PdfReader
 from docx import Document
+
+from services.model_factory import get_model
+
+from prompts.functional_prompts import (
+    build_review_prompt,
+    build_test_point_prompt,
+    build_test_case_prompt,
+    build_add_missing_prompt,
+    build_remove_duplicate_prompt,
+    build_optimize_all_prompt,
+    build_quality_prompt,
+    build_requirement_split_prompt,
+    build_rtm_prompt,
+    build_bug_analysis_prompt
+)
 
 from rag import (
     get_rag_context,
@@ -212,30 +230,17 @@ os.makedirs(
 
 
 # =========================================================
-# 4. API 配置
+# 4. AI 模型配置
 # =========================================================
 
-load_dotenv()
+try:
+    model = get_model()
 
-api_key = os.getenv(
-    "DEEPSEEK_API_KEY"
-)
-
-if not api_key:
-
+except Exception as e:
     st.error(
-        "系统 API 配置缺失，请检查 .env 文件。"
+        f"AI 服务初始化失败：{e}"
     )
-
     st.stop()
-
-
-model = ChatOpenAI(
-    model="deepseek-chat",
-    api_key=api_key,
-    base_url="https://api.deepseek.com",
-    temperature=0
-)
 
 
 # =========================================================
@@ -255,9 +260,7 @@ default_states = {
 }
 
 for key, value in default_states.items():
-
     if key not in st.session_state:
-
         st.session_state[key] = value
 
 
@@ -305,7 +308,6 @@ def parse_json_list(content):
     except Exception:
         pass
 
-
     start = cleaned.find(
         "["
     )
@@ -337,7 +339,6 @@ def parse_json_list(content):
         except Exception:
             pass
 
-
     return None
 
 
@@ -361,7 +362,6 @@ def parse_json_dict(content):
 
     except Exception:
         pass
-
 
     start = cleaned.find(
         "{"
@@ -394,7 +394,6 @@ def parse_json_dict(content):
         except Exception:
             pass
 
-
     return None
 
 
@@ -407,13 +406,11 @@ def read_text_file(uploaded_file):
     content = uploaded_file.getvalue()
 
     try:
-
         return content.decode(
             "utf-8"
         )
 
     except UnicodeDecodeError:
-
         return content.decode(
             "gbk",
             errors="ignore"
@@ -478,7 +475,6 @@ def read_word_file(uploaded_file):
                     value
                     + "\n"
                 )
-
 
         for table in document.tables:
 
@@ -721,7 +717,6 @@ def create_excel(
         bottom=thin
     )
 
-
     # =====================================================
     # Sheet 1 测试用例
     # =====================================================
@@ -744,7 +739,6 @@ def create_excel(
     ws.append(
         headers
     )
-
 
     for case in test_cases:
 
@@ -785,7 +779,6 @@ def create_excel(
             ]
         )
 
-
     for cell in ws[1]:
 
         cell.font = Font(
@@ -799,7 +792,6 @@ def create_excel(
             vertical="center"
         )
 
-
     for row in ws.iter_rows(
         min_row=2
     ):
@@ -812,7 +804,6 @@ def create_excel(
                 vertical="top",
                 wrap_text=True
             )
-
 
     widths = {
         "A": 12,
@@ -833,13 +824,11 @@ def create_excel(
             column
         ].width = width
 
-
     ws.freeze_panes = "A2"
 
     ws.auto_filter.ref = (
         ws.dimensions
     )
-
 
     # =====================================================
     # Sheet 2 RTM
@@ -862,7 +851,6 @@ def create_excel(
             ]
         )
 
-
         for item in rtm_result:
 
             covered_cases = item.get(
@@ -880,7 +868,6 @@ def create_excel(
                         covered_cases
                     )
                 )
-
 
             rtm_ws.append(
                 [
@@ -908,7 +895,6 @@ def create_excel(
                 ]
             )
 
-
         for cell in rtm_ws[1]:
 
             cell.font = Font(
@@ -922,7 +908,6 @@ def create_excel(
                 vertical="center"
             )
 
-
         for row in rtm_ws.iter_rows(
             min_row=2
         ):
@@ -935,7 +920,6 @@ def create_excel(
                     vertical="top",
                     wrap_text=True
                 )
-
 
         rtm_widths = {
             "A": 12,
@@ -954,9 +938,7 @@ def create_excel(
                 column
             ].width = width
 
-
         rtm_ws.freeze_panes = "A2"
-
 
     output = BytesIO()
 
@@ -1005,7 +987,6 @@ with st.sidebar:
         )
     )
 
-
     if knowledge_files:
 
         if st.button(
@@ -1041,13 +1022,11 @@ with st.sidebar:
                             uploaded_file.getbuffer()
                         )
 
-
                 with st.spinner(
                     "正在更新知识库..."
                 ):
 
                     rebuild_vector_db()
-
 
                 st.success(
                     "知识库更新成功"
@@ -1061,9 +1040,7 @@ with st.sidebar:
                     f"知识库更新失败：{e}"
                 )
 
-
     st.divider()
-
 
     try:
 
@@ -1075,7 +1052,6 @@ with st.sidebar:
 
         knowledge_file_list = []
 
-
     if knowledge_file_list:
 
         selected_file = (
@@ -1085,11 +1061,9 @@ with st.sidebar:
             )
         )
 
-
         preview_col1, preview_col2 = (
             st.columns(2)
         )
-
 
         with preview_col1:
 
@@ -1109,7 +1083,6 @@ with st.sidebar:
                         selected_file
                     )
                 )
-
 
         with preview_col2:
 
@@ -1146,13 +1119,11 @@ with st.sidebar:
             "知识库暂无文件"
         )
 
-
     st.divider()
 
     st.markdown(
         "### 📊 当前测试状态"
     )
-
 
     sidebar_cases = (
         st.session_state[
@@ -1160,11 +1131,9 @@ with st.sidebar:
         ]
     )
 
-
     total_sidebar = len(
         sidebar_cases
     )
-
 
     p0_sidebar = sum(
         case.get(
@@ -1173,7 +1142,6 @@ with st.sidebar:
         for case in sidebar_cases
     )
 
-
     p1_sidebar = sum(
         case.get(
             "priority"
@@ -1181,14 +1149,12 @@ with st.sidebar:
         for case in sidebar_cases
     )
 
-
     p2_sidebar = sum(
         case.get(
             "priority"
         ) == "P2"
         for case in sidebar_cases
     )
-
 
     side1, side2 = st.columns(
         2
@@ -1203,7 +1169,6 @@ with st.sidebar:
         "P0",
         p0_sidebar
     )
-
 
     side3, side4 = st.columns(
         2
@@ -1294,7 +1259,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-
 with st.container(
     border=True
 ):
@@ -1308,9 +1272,7 @@ with st.container(
         horizontal=True
     )
 
-
     requirement = ""
-
 
     if input_method == "手动输入":
 
@@ -1334,7 +1296,6 @@ with st.container(
 """
         )
 
-
     else:
 
         uploaded_requirement = (
@@ -1350,7 +1311,6 @@ with st.container(
             )
         )
 
-
         if uploaded_requirement:
 
             parsed_requirement = (
@@ -1365,7 +1325,6 @@ with st.container(
                 height=280
             )
 
-
     start_col1, start_col2 = (
         st.columns(
             [
@@ -1375,7 +1334,6 @@ with st.container(
         )
     )
 
-
     with start_col1:
 
         start_analysis = st.button(
@@ -1383,7 +1341,6 @@ with st.container(
             type="primary",
             use_container_width=True
         )
-
 
     with start_col2:
 
@@ -1406,7 +1363,6 @@ if start_analysis:
 
         st.stop()
 
-
     st.session_state[
         "current_requirement"
     ] = requirement
@@ -1422,7 +1378,6 @@ if start_analysis:
     st.session_state[
         "requirement_items"
     ] = []
-
 
     # =====================================================
     # RAG
@@ -1447,45 +1402,18 @@ if start_analysis:
             f"知识检索失败：{e}"
         )
 
-
     st.session_state[
         "rag_context"
     ] = rag_context
-
 
     # =====================================================
     # 需求评审
     # =====================================================
 
-    review_prompt = f"""
-你是一名资深软件测试工程师。
-
-请严格根据当前需求进行需求评审。
-
-规则：
-
-1. 当前需求是唯一业务依据。
-2. 历史测试资料只作为经验参考。
-3. 不允许自行创造需求规则。
-4. 未说明内容必须标记【需求待确认】。
-
-输出：
-
-## 一、需求理解
-## 二、已明确需求规则
-## 三、需求风险
-## 四、需求待确认
-## 五、测试建议
-
-当前需求：
-
-{requirement}
-
-历史测试参考：
-
-{rag_context}
-"""
-
+    review_prompt = build_review_prompt(
+        requirement,
+        rag_context
+    )
 
     try:
 
@@ -1507,7 +1435,6 @@ if start_analysis:
 
         st.stop()
 
-
     review_content = (
         review_response.content
     )
@@ -1516,46 +1443,15 @@ if start_analysis:
         "review_content"
     ] = review_content
 
-
     # =====================================================
     # 测试点
     # =====================================================
 
-    analysis_prompt = f"""
-你是一名专业软件测试工程师。
-
-根据需求和需求评审分析完整测试点。
-
-必须覆盖：
-
-1. 正常场景
-2. 异常场景
-3. 边界值
-4. 业务规则
-5. 数据校验
-6. 状态流转
-7. 权限与安全
-8. 兼容性
-9. 历史缺陷回归
-10. 需求待确认
-
-要求：
-
-不得创造需求中没有的业务规则。
-
-需求：
-
-{requirement}
-
-需求评审：
-
-{review_content}
-
-测试经验：
-
-{rag_context}
-"""
-
+    analysis_prompt = build_test_point_prompt(
+        requirement,
+        review_content,
+        rag_context
+    )
 
     try:
 
@@ -1577,7 +1473,6 @@ if start_analysis:
 
         st.stop()
 
-
     analysis_content = (
         analysis_response.content
     )
@@ -1586,64 +1481,16 @@ if start_analysis:
         "analysis_content"
     ] = analysis_content
 
-
     # =====================================================
     # 测试用例
     # =====================================================
 
-    case_prompt = f"""
-你是一名专业软件测试工程师。
-
-根据需求、需求评审、测试点和历史测试经验
-生成完整测试用例。
-
-字段必须包含：
-
-case_id
-module
-title
-precondition
-steps
-test_data
-expected_result
-priority
-
-priority 只能：
-
-P0
-P1
-P2
-
-要求：
-
-1. 覆盖正常场景。
-2. 覆盖异常场景。
-3. 覆盖边界场景。
-4. 覆盖核心业务规则。
-5. 历史 Bug 只作为回归经验。
-6. 不允许创造需求中不存在的规则。
-7. 未明确内容标记【需求待确认】。
-8. 避免重复测试用例。
-9. 只输出合法 JSON 数组。
-10. 不输出 Markdown。
-
-需求：
-
-{requirement}
-
-需求评审：
-
-{review_content}
-
-测试点：
-
-{analysis_content}
-
-历史测试经验：
-
-{rag_context}
-"""
-
+    case_prompt = build_test_case_prompt(
+        requirement,
+        review_content,
+        analysis_content,
+        rag_context
+    )
 
     try:
 
@@ -1665,11 +1512,9 @@ P2
 
         st.stop()
 
-
     test_cases = parse_json_list(
         case_response.content
     )
-
 
     if test_cases is None:
 
@@ -1687,13 +1532,11 @@ P2
 
         st.stop()
 
-
     st.session_state[
         "test_cases"
     ] = normalize_case_ids(
         test_cases
     )
-
 
     st.success(
         f"分析完成，共生成 {len(test_cases)} 条测试用例。"
@@ -1722,7 +1565,6 @@ if (
         unsafe_allow_html=True
     )
 
-
     review_tab, point_tab, knowledge_tab = (
         st.tabs(
             [
@@ -1733,7 +1575,6 @@ if (
         )
     )
 
-
     with review_tab:
 
         st.markdown(
@@ -1742,7 +1583,6 @@ if (
             ]
         )
 
-
     with point_tab:
 
         st.markdown(
@@ -1750,7 +1590,6 @@ if (
                 "analysis_content"
             ]
         )
-
 
     with knowledge_tab:
 
@@ -1782,7 +1621,6 @@ if st.session_state[
         "支持直接编辑、新增和删除测试用例。"
     )
 
-
     dataframe = (
         test_cases_to_dataframe(
             st.session_state[
@@ -1790,7 +1628,6 @@ if st.session_state[
             ]
         )
     )
-
 
     edited_df = st.data_editor(
         dataframe,
@@ -1825,13 +1662,11 @@ if st.session_state[
         }
     )
 
-
     current_cases = (
         dataframe_to_test_cases(
             edited_df
         )
     )
-
 
     save_col1, save_col2 = (
         st.columns(
@@ -1842,14 +1677,12 @@ if st.session_state[
         )
     )
 
-
     with save_col1:
 
         save_cases = st.button(
             "💾 保存修改",
             use_container_width=True
         )
-
 
     if save_cases:
 
@@ -1877,7 +1710,6 @@ if st.session_state[
 
         st.rerun()
 
-
     current_requirement = (
         st.session_state[
             "current_requirement"
@@ -1895,7 +1727,6 @@ if st.session_state[
             "rag_context"
         ]
     )
-
 
     # =====================================================
     # 17. 智能优化
@@ -1915,11 +1746,9 @@ if st.session_state[
         unsafe_allow_html=True
     )
 
-
     optimize_col1, optimize_col2, optimize_col3 = (
         st.columns(3)
     )
-
 
     with optimize_col1:
 
@@ -1928,14 +1757,12 @@ if st.session_state[
             use_container_width=True
         )
 
-
     with optimize_col2:
 
         remove_duplicate = st.button(
             "🧹 删除重复用例",
             use_container_width=True
         )
-
 
     with optimize_col3:
 
@@ -1945,53 +1772,21 @@ if st.session_state[
             use_container_width=True
         )
 
+    # =====================================================
+    # 补充遗漏
+    # =====================================================
 
     if add_missing:
 
-        prompt = f"""
-你是一名高级软件测试工程师。
-
-检查现有测试用例是否存在遗漏。
-
-要求：
-
-1. 保留已有有效用例。
-2. 只补充真正遗漏的场景。
-3. 不生成重复用例。
-4. 不创造需求规则。
-5. 返回原用例 + 新增用例的完整 JSON 数组。
-
-字段：
-
-case_id
-module
-title
-precondition
-steps
-test_data
-expected_result
-priority
-
-需求：
-
-{current_requirement}
-
-测试点：
-
-{current_analysis}
-
-历史测试经验：
-
-{current_rag}
-
-现有用例：
-
-{json.dumps(
-    current_cases,
-    ensure_ascii=False
-)}
-"""
-
+        prompt = build_add_missing_prompt(
+            current_requirement,
+            current_analysis,
+            current_rag,
+            json.dumps(
+                current_cases,
+                ensure_ascii=False
+            )
+        )
 
         try:
 
@@ -2019,7 +1814,6 @@ priority
                 f"用例补充失败：{e}"
             )
 
-
         if optimized:
 
             st.session_state[
@@ -2038,29 +1832,18 @@ priority
 
             st.rerun()
 
+    # =====================================================
+    # 删除重复
+    # =====================================================
 
     if remove_duplicate:
 
-        prompt = f"""
-你是一名高级软件测试工程师。
-
-删除下面测试用例中的重复或高度重复场景。
-
-要求：
-
-1. 不删除具有独立测试价值的用例。
-2. 保留边界和异常测试。
-3. 不创造新的需求规则。
-4. 返回完整 JSON 数组。
-
-测试用例：
-
-{json.dumps(
-    current_cases,
-    ensure_ascii=False
-)}
-"""
-
+        prompt = build_remove_duplicate_prompt(
+            json.dumps(
+                current_cases,
+                ensure_ascii=False
+            )
+        )
 
         try:
 
@@ -2088,7 +1871,6 @@ priority
                 f"用例去重失败：{e}"
             )
 
-
         if optimized:
 
             st.session_state[
@@ -2107,59 +1889,21 @@ priority
 
             st.rerun()
 
+    # =====================================================
+    # 全面优化
+    # =====================================================
 
     if optimize_all:
 
-        prompt = f"""
-你是一名高级软件测试工程师。
-
-全面优化当前测试用例。
-
-目标：
-
-1. 删除重复用例。
-2. 补充遗漏测试场景。
-3. 优化标题。
-4. 优化前置条件。
-5. 优化步骤。
-6. 优化测试数据。
-7. 优化预期结果。
-8. 调整不合理优先级。
-9. 不创造需求中不存在的规则。
-
-字段：
-
-case_id
-module
-title
-precondition
-steps
-test_data
-expected_result
-priority
-
-只输出 JSON 数组。
-
-需求：
-
-{current_requirement}
-
-测试点：
-
-{current_analysis}
-
-历史经验：
-
-{current_rag}
-
-当前用例：
-
-{json.dumps(
-    current_cases,
-    ensure_ascii=False
-)}
-"""
-
+        prompt = build_optimize_all_prompt(
+            current_requirement,
+            current_analysis,
+            current_rag,
+            json.dumps(
+                current_cases,
+                ensure_ascii=False
+            )
+        )
 
         try:
 
@@ -2187,7 +1931,6 @@ priority
                 f"全面优化失败：{e}"
             )
 
-
         if optimized:
 
             st.session_state[
@@ -2206,7 +1949,6 @@ priority
 
             st.rerun()
 
-
     # =====================================================
     # 18. 质量评估
     # =====================================================
@@ -2222,7 +1964,6 @@ priority
         "从需求覆盖、边界、异常、业务规则和可执行性等维度进行评估。"
     )
 
-
     quality_col1, quality_col2 = (
         st.columns(
             [
@@ -2232,7 +1973,6 @@ priority
         )
     )
 
-
     with quality_col1:
 
         quality_button = st.button(
@@ -2241,53 +1981,16 @@ priority
             use_container_width=True
         )
 
-
     if quality_button:
 
-        prompt = f"""
-你是一名高级软件测试负责人。
-
-严格评估当前测试用例质量。
-
-返回合法 JSON 对象：
-
-{{
-  "overall_score": 0,
-  "requirement_coverage": 0,
-  "normal_coverage": 0,
-  "exception_coverage": 0,
-  "boundary_coverage": 0,
-  "business_rule_coverage": 0,
-  "executability": 0,
-  "non_duplicate_score": 0,
-  "strengths": [],
-  "missing_scenarios": [],
-  "duplicate_risks": [],
-  "high_risk_gaps": [],
-  "improvement_suggestions": [],
-  "summary": ""
-}}
-
-所有评分范围 0-100。
-
-不得创造需求中不存在的规则。
-
-需求：
-
-{current_requirement}
-
-测试点：
-
-{current_analysis}
-
-测试用例：
-
-{json.dumps(
-    current_cases,
-    ensure_ascii=False
-)}
-"""
-
+        prompt = build_quality_prompt(
+            current_requirement,
+            current_analysis,
+            json.dumps(
+                current_cases,
+                ensure_ascii=False
+            )
+        )
 
         try:
 
@@ -2315,20 +2018,17 @@ priority
                 f"质量评估失败：{e}"
             )
 
-
         if quality_result:
 
             st.session_state[
                 "quality_result"
             ] = quality_result
 
-
     quality_result = (
         st.session_state[
             "quality_result"
         ]
     )
-
 
     if quality_result:
 
@@ -2339,7 +2039,6 @@ priority
             )
         )
 
-
         quality1, quality2 = (
             st.columns(
                 [
@@ -2349,14 +2048,12 @@ priority
             )
         )
 
-
         with quality1:
 
             st.metric(
                 "总体质量分",
                 f"{overall_score}/100"
             )
-
 
         with quality2:
 
@@ -2376,7 +2073,6 @@ priority
                     ""
                 )
             )
-
 
         metric_items = [
             (
@@ -2409,11 +2105,9 @@ priority
             )
         ]
 
-
         quality_columns = st.columns(
             7
         )
-
 
         for column, (
             label,
@@ -2431,7 +2125,6 @@ priority
                 )
             )
 
-
         quality_tab1, quality_tab2, quality_tab3, quality_tab4 = (
             st.tabs(
                 [
@@ -2443,7 +2136,6 @@ priority
             )
         )
 
-
         with quality_tab1:
 
             for item in quality_result.get(
@@ -2454,7 +2146,6 @@ priority
                 st.write(
                     f"• {item}"
                 )
-
 
         with quality_tab2:
 
@@ -2477,7 +2168,6 @@ priority
                     "未发现明显遗漏"
                 )
 
-
         with quality_tab3:
 
             items = quality_result.get(
@@ -2499,7 +2189,6 @@ priority
                     "未发现明显高风险遗漏"
                 )
 
-
         with quality_tab4:
 
             for item in quality_result.get(
@@ -2510,7 +2199,6 @@ priority
                 st.write(
                     f"• {item}"
                 )
-
 
     # =====================================================
     # 19. RTM
@@ -2527,7 +2215,6 @@ priority
         "检查每条需求是否被测试用例真正覆盖。"
     )
 
-
     rtm_col1, rtm_col2 = (
         st.columns(
             [
@@ -2537,7 +2224,6 @@ priority
         )
     )
 
-
     with rtm_col1:
 
         generate_rtm = st.button(
@@ -2545,31 +2231,13 @@ priority
             use_container_width=True
         )
 
-
     if generate_rtm:
 
-        requirement_prompt = f"""
-你是一名软件测试需求分析工程师。
-
-把原始需求拆分成最小可验证需求条目。
-
-字段：
-
-requirement_id
-requirement
-requirement_type
-
-编号从 R001 开始。
-
-不得创造需求中不存在的规则。
-
-只输出 JSON 数组。
-
-需求：
-
-{current_requirement}
-"""
-
+        requirement_prompt = (
+            build_requirement_split_prompt(
+                current_requirement
+            )
+        )
 
         try:
 
@@ -2597,57 +2265,22 @@ requirement_type
                 f"需求拆分失败：{e}"
             )
 
-
         if requirement_items:
 
             st.session_state[
                 "requirement_items"
             ] = requirement_items
 
-
-            rtm_prompt = f"""
-你是一名高级软件测试工程师。
-
-建立需求追踪矩阵。
-
-字段：
-
-requirement_id
-requirement
-requirement_type
-covered_cases
-coverage_status
-note
-
-coverage_status 只能：
-
-已覆盖
-部分覆盖
-未覆盖
-
-规则：
-
-1. 不强行建立需求与用例映射。
-2. covered_cases 只能使用已有测试用例编号。
-3. 没有覆盖返回空数组。
-4. 每条需求必须返回。
-5. 不允许新增需求。
-
-需求：
-
-{json.dumps(
-    requirement_items,
-    ensure_ascii=False
-)}
-
-测试用例：
-
-{json.dumps(
-    current_cases,
-    ensure_ascii=False
-)}
-"""
-
+            rtm_prompt = build_rtm_prompt(
+                json.dumps(
+                    requirement_items,
+                    ensure_ascii=False
+                ),
+                json.dumps(
+                    current_cases,
+                    ensure_ascii=False
+                )
+            )
 
             try:
 
@@ -2675,7 +2308,6 @@ coverage_status 只能：
                     f"需求追踪生成失败：{e}"
                 )
 
-
             if rtm_result:
 
                 st.session_state[
@@ -2684,18 +2316,15 @@ coverage_status 只能：
 
                 st.rerun()
 
-
     rtm_result = (
         st.session_state[
             "rtm_result"
         ]
     )
 
-
     if rtm_result:
 
         rtm_rows = []
-
 
         for item in rtm_result:
 
@@ -2714,7 +2343,6 @@ coverage_status 只能：
                         covered_cases
                     )
                 )
-
 
             rtm_rows.append(
                 {
@@ -2753,7 +2381,6 @@ coverage_status 只能：
                 }
             )
 
-
         st.dataframe(
             pd.DataFrame(
                 rtm_rows
@@ -2761,7 +2388,6 @@ coverage_status 只能：
             use_container_width=True,
             hide_index=True
         )
-
 
     # =====================================================
     # 20. Dashboard
@@ -2774,11 +2400,9 @@ coverage_status 只能：
         unsafe_allow_html=True
     )
 
-
     total_count = len(
         current_cases
     )
-
 
     p0_count = sum(
         case.get(
@@ -2787,14 +2411,12 @@ coverage_status 只能：
         for case in current_cases
     )
 
-
     p1_count = sum(
         case.get(
             "priority"
         ) == "P1"
         for case in current_cases
     )
-
 
     p2_count = sum(
         case.get(
@@ -2803,11 +2425,9 @@ coverage_status 只能：
         for case in current_cases
     )
 
-
     total_requirements = len(
         rtm_result
     )
-
 
     covered_count = sum(
         item.get(
@@ -2816,7 +2436,6 @@ coverage_status 只能：
         for item in rtm_result
     )
 
-
     partial_count = sum(
         item.get(
             "coverage_status"
@@ -2824,14 +2443,12 @@ coverage_status 只能：
         for item in rtm_result
     )
 
-
     uncovered_count = sum(
         item.get(
             "coverage_status"
         ) == "未覆盖"
         for item in rtm_result
     )
-
 
     if total_requirements:
 
@@ -2845,7 +2462,6 @@ coverage_status 只能：
     else:
 
         coverage_rate = 0
-
 
     if quality_result:
 
@@ -2878,11 +2494,9 @@ coverage_status 只能：
 
         duplicate_risks = []
 
-
     dashboard1, dashboard2, dashboard3, dashboard4 = (
         st.columns(4)
     )
-
 
     dashboard1.metric(
         "测试用例总数",
@@ -2904,11 +2518,9 @@ coverage_status 只能：
         uncovered_count
     )
 
-
     dashboard5, dashboard6, dashboard7, dashboard8 = (
         st.columns(4)
     )
-
 
     dashboard5.metric(
         "P0 核心用例",
@@ -2933,7 +2545,6 @@ coverage_status 只能：
             duplicate_risks
         )
     )
-
 
     if (
         overall_score >= 90
@@ -2960,7 +2571,6 @@ coverage_status 只能：
             "完成质量评估和需求追踪后，可获得更完整的测试质量判断。"
         )
 
-
     # =====================================================
     # 21. 导出
     # =====================================================
@@ -2972,14 +2582,12 @@ coverage_status 只能：
         unsafe_allow_html=True
     )
 
-
     excel_file = create_excel(
         normalize_case_ids(
             current_cases
         ),
         rtm_result
     )
-
 
     export_col1, export_col2 = (
         st.columns(
@@ -2989,7 +2597,6 @@ coverage_status 只能：
             ]
         )
     )
-
 
     with export_col1:
 
@@ -3027,7 +2634,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-
 with st.container(
     border=True
 ):
@@ -3036,7 +2642,6 @@ with st.container(
         st.columns(2)
     )
 
-
     with bug_col1:
 
         bug_title = st.text_input(
@@ -3044,18 +2649,15 @@ with st.container(
             placeholder="例如：连续输错5次密码后账号未锁定"
         )
 
-
         bug_description = st.text_area(
             "Bug 描述",
             height=120
         )
 
-
         bug_environment = st.text_input(
             "测试环境",
             placeholder="例如：Android 14 / 测试环境"
         )
-
 
     with bug_col2:
 
@@ -3064,18 +2666,15 @@ with st.container(
             height=120
         )
 
-
         bug_expected = st.text_area(
             "预期结果",
             height=90
         )
 
-
         bug_actual = st.text_area(
             "实际结果",
             height=90
         )
-
 
     bug_btn_col1, bug_btn_col2 = (
         st.columns(
@@ -3085,7 +2684,6 @@ with st.container(
             ]
         )
     )
-
 
     with bug_btn_col1:
 
@@ -3109,60 +2707,14 @@ if analyze_bug:
 
     else:
 
-        bug_prompt = f"""
-你是一名高级软件测试工程师。
-
-分析下面的 Bug。
-
-注意：
-
-1. 不要声称已经确认真实代码根因。
-2. root_causes 只能表示可能原因。
-3. 给出实际可执行的定位建议。
-4. 分析测试遗漏。
-5. 给出回归测试点。
-6. knowledge_summary 需要适合保存到历史 Bug 知识库。
-
-只输出合法 JSON：
-
-{{
-  "severity": "S1/S2/S3/S4",
-  "priority": "P0/P1/P2",
-  "bug_type": "功能/接口/数据/兼容性/性能/安全/UI/其他",
-  "module": "",
-  "impact": "",
-  "root_causes": [],
-  "localization_steps": [],
-  "test_gaps": [],
-  "regression_points": [],
-  "knowledge_summary": ""
-}}
-
-Bug标题：
-
-{bug_title}
-
-Bug描述：
-
-{bug_description}
-
-复现步骤：
-
-{bug_steps}
-
-预期结果：
-
-{bug_expected}
-
-实际结果：
-
-{bug_actual}
-
-环境：
-
-{bug_environment}
-"""
-
+        bug_prompt = build_bug_analysis_prompt(
+            bug_title,
+            bug_description,
+            bug_steps,
+            bug_expected,
+            bug_actual,
+            bug_environment
+        )
 
         try:
 
@@ -3190,7 +2742,6 @@ Bug描述：
                 f"Bug 分析失败：{e}"
             )
 
-
         if bug_analysis:
 
             st.session_state[
@@ -3211,11 +2762,9 @@ if bug_analysis:
         "### Bug 分析结果"
     )
 
-
     bug_metric1, bug_metric2, bug_metric3 = (
         st.columns(3)
     )
-
 
     bug_metric1.metric(
         "严重程度",
@@ -3241,7 +2790,6 @@ if bug_analysis:
         )
     )
 
-
     bug_tab1, bug_tab2, bug_tab3, bug_tab4 = (
         st.tabs(
             [
@@ -3253,7 +2801,6 @@ if bug_analysis:
         )
     )
 
-
     with bug_tab1:
 
         for item in bug_analysis.get(
@@ -3264,7 +2811,6 @@ if bug_analysis:
             st.write(
                 f"• {item}"
             )
-
 
     with bug_tab2:
 
@@ -3280,7 +2826,6 @@ if bug_analysis:
                 f"{index}. {item}"
             )
 
-
     with bug_tab3:
 
         for item in bug_analysis.get(
@@ -3291,7 +2836,6 @@ if bug_analysis:
             st.write(
                 f"• {item}"
             )
-
 
     with bug_tab4:
 
@@ -3304,7 +2848,6 @@ if bug_analysis:
                 f"• {item}"
             )
 
-
     knowledge_summary = st.text_area(
         "知识库摘要",
         value=bug_analysis.get(
@@ -3314,7 +2857,6 @@ if bug_analysis:
         height=150,
         key="knowledge_summary_editor"
     )
-
 
     if st.button(
         "📚 保存到历史 Bug 知识库"
@@ -3327,7 +2869,6 @@ if bug_analysis:
                     "%Y-%m-%d %H:%M:%S"
                 )
             )
-
 
             record = f"""
 
@@ -3381,7 +2922,6 @@ Bug类型：
 
 """
 
-
             with open(
                 HISTORY_BUG_FILE,
                 "a",
@@ -3392,18 +2932,15 @@ Bug类型：
                     record
                 )
 
-
             with st.spinner(
                 "正在更新测试知识库..."
             ):
 
                 rebuild_vector_db()
 
-
             st.success(
                 "Bug 已保存到历史测试知识库。"
             )
-
 
         except Exception as e:
 
@@ -3422,7 +2959,6 @@ if st.session_state[
 
     st.divider()
 
-
     clear_col1, clear_col2 = (
         st.columns(
             [
@@ -3431,7 +2967,6 @@ if st.session_state[
             ]
         )
     )
-
 
     with clear_col1:
 
@@ -3471,5 +3006,9 @@ if st.session_state[
             st.session_state[
                 "requirement_items"
             ] = []
+
+            st.session_state[
+                "bug_analysis"
+            ] = None
 
             st.rerun()
