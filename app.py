@@ -1,22 +1,9 @@
 import os
 import json
-
-from io import BytesIO
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-
-from openpyxl import Workbook
-from openpyxl.styles import (
-    Font,
-    Alignment,
-    Border,
-    Side
-)
-
-from pypdf import PdfReader
-from docx import Document
 
 from services.model_factory import get_model
 
@@ -30,7 +17,7 @@ from prompts.functional_prompts import (
     build_quality_prompt,
     build_requirement_split_prompt,
     build_rtm_prompt,
-    build_bug_analysis_prompt
+    build_bug_analysis_prompt,
 )
 
 from rag import (
@@ -38,7 +25,26 @@ from rag import (
     rebuild_vector_db,
     get_knowledge_file_list,
     get_knowledge_file_content,
-    delete_knowledge_file
+    delete_knowledge_file,
+)
+
+from utils.json_utils import (
+    parse_json_list,
+    parse_json_dict,
+)
+
+from utils.file_utils import (
+    extract_requirement,
+)
+
+from utils.case_utils import (
+    normalize_case_ids,
+    functional_cases_to_dataframe,
+    dataframe_to_functional_cases,
+)
+
+from utils.excel_utils import (
+    create_test_result_excel,
 )
 
 
@@ -50,19 +56,18 @@ st.set_page_config(
     page_title="AI 软件测试平台",
     page_icon="🧪",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 
 # =========================================================
-# 2. 前端样式
+# 2. 页面样式
 # =========================================================
 
 st.markdown(
     """
 <style>
 
-/* 页面整体 */
 .stApp {
     background:
         linear-gradient(
@@ -78,12 +83,10 @@ st.markdown(
     padding-bottom: 4rem;
 }
 
-/* 隐藏 footer */
 footer {
     visibility: hidden;
 }
 
-/* 顶部 Hero */
 .hero-card {
     padding: 26px 30px;
     border-radius: 18px;
@@ -125,7 +128,6 @@ footer {
     margin-top: 4px;
 }
 
-/* section */
 .section-title {
     font-size: 22px;
     font-weight: 760;
@@ -139,7 +141,6 @@ footer {
     margin-bottom: 14px;
 }
 
-/* Metric */
 [data-testid="stMetric"] {
     background: white;
     border: 1px solid #e6eaf0;
@@ -154,7 +155,6 @@ footer {
     font-weight: 760;
 }
 
-/* button */
 .stButton > button {
     border-radius: 10px;
     min-height: 42px;
@@ -167,7 +167,6 @@ footer {
     font-weight: 650;
 }
 
-/* input */
 div[data-baseweb="input"] > div {
     border-radius: 10px;
 }
@@ -176,37 +175,33 @@ textarea {
     border-radius: 10px !important;
 }
 
-/* alert */
 [data-testid="stAlert"] {
     border-radius: 12px;
 }
 
-/* dataframe */
 [data-testid="stDataFrame"] {
     border: 1px solid #e6eaf0;
     border-radius: 12px;
     overflow: hidden;
 }
 
-/* sidebar */
 [data-testid="stSidebar"] {
     background: #f8fafc;
     border-right: 1px solid #e6eaf0;
 }
 
-/* tabs */
 button[data-baseweb="tab"] {
     font-weight: 650;
 }
 
 </style>
 """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 
 # =========================================================
-# 3. 路径
+# 3. 项目路径
 # =========================================================
 
 BASE_DIR = os.path.dirname(
@@ -215,22 +210,22 @@ BASE_DIR = os.path.dirname(
 
 KNOWLEDGE_DIR = os.path.join(
     BASE_DIR,
-    "knowledge"
+    "knowledge",
 )
 
 HISTORY_BUG_FILE = os.path.join(
     KNOWLEDGE_DIR,
-    "历史Bug.txt"
+    "历史Bug.txt",
 )
 
 os.makedirs(
     KNOWLEDGE_DIR,
-    exist_ok=True
+    exist_ok=True,
 )
 
 
 # =========================================================
-# 4. AI 模型配置
+# 4. AI 模型
 # =========================================================
 
 try:
@@ -247,7 +242,7 @@ except Exception as e:
 # 5. Session State
 # =========================================================
 
-default_states = {
+DEFAULT_STATES = {
     "test_cases": [],
     "review_content": "",
     "analysis_content": "",
@@ -256,937 +251,224 @@ default_states = {
     "quality_result": None,
     "rtm_result": [],
     "requirement_items": [],
-    "bug_analysis": None
+    "bug_analysis": None,
+    "knowledge_preview": "",
 }
 
-for key, value in default_states.items():
+for key, value in DEFAULT_STATES.items():
+
     if key not in st.session_state:
         st.session_state[key] = value
 
 
 # =========================================================
-# 6. JSON 工具
+# 6. 通用方法
 # =========================================================
 
-def clean_json_text(content):
+def invoke_model(prompt):
+    """
+    统一调用大模型。
+    """
 
-    if not content:
-        return ""
+    response = model.invoke(prompt)
 
-    content = content.strip()
-
-    if content.startswith("```json"):
-        content = content[len("```json"):].strip()
-
-    elif content.startswith("```"):
-        content = content[3:].strip()
-
-    if content.endswith("```"):
-        content = content[:-3].strip()
-
-    return content
-
-
-def parse_json_list(content):
-
-    cleaned = clean_json_text(
-        content
+    content = getattr(
+        response,
+        "content",
+        response,
     )
 
+    return str(content)
+
+
+def reset_analysis_state():
+    """
+    清空当前需求分析产生的数据。
+    """
+
+    st.session_state.test_cases = []
+    st.session_state.review_content = ""
+    st.session_state.analysis_content = ""
+    st.session_state.rag_context = ""
+    st.session_state.current_requirement = ""
+    st.session_state.quality_result = None
+    st.session_state.rtm_result = []
+    st.session_state.requirement_items = []
+
+
+def safe_score(value):
+    """
+    将 AI 返回评分安全转换为整数。
+    """
+
     try:
-
-        result = json.loads(
-            cleaned
-        )
-
-        if isinstance(
-            result,
-            list
-        ):
-            return result
+        return int(float(value))
 
     except Exception:
-        pass
-
-    start = cleaned.find(
-        "["
-    )
-
-    end = cleaned.rfind(
-        "]"
-    )
-
-    if (
-        start != -1
-        and end != -1
-        and end > start
-    ):
-
-        try:
-
-            result = json.loads(
-                cleaned[
-                    start:end + 1
-                ]
-            )
-
-            if isinstance(
-                result,
-                list
-            ):
-                return result
-
-        except Exception:
-            pass
-
-    return None
-
-
-def parse_json_dict(content):
-
-    cleaned = clean_json_text(
-        content
-    )
-
-    try:
-
-        result = json.loads(
-            cleaned
-        )
-
-        if isinstance(
-            result,
-            dict
-        ):
-            return result
-
-    except Exception:
-        pass
-
-    start = cleaned.find(
-        "{"
-    )
-
-    end = cleaned.rfind(
-        "}"
-    )
-
-    if (
-        start != -1
-        and end != -1
-        and end > start
-    ):
-
-        try:
-
-            result = json.loads(
-                cleaned[
-                    start:end + 1
-                ]
-            )
-
-            if isinstance(
-                result,
-                dict
-            ):
-                return result
-
-        except Exception:
-            pass
-
-    return None
+        return 0
 
 
 # =========================================================
-# 7. 文件读取
-# =========================================================
-
-def read_text_file(uploaded_file):
-
-    content = uploaded_file.getvalue()
-
-    try:
-        return content.decode(
-            "utf-8"
-        )
-
-    except UnicodeDecodeError:
-        return content.decode(
-            "gbk",
-            errors="ignore"
-        )
-
-
-def read_pdf_file(uploaded_file):
-
-    text = ""
-
-    try:
-
-        reader = PdfReader(
-            uploaded_file
-        )
-
-        for page_number, page in enumerate(
-            reader.pages,
-            start=1
-        ):
-
-            page_text = (
-                page.extract_text()
-            )
-
-            if page_text:
-
-                text += (
-                    f"\n===== 第 {page_number} 页 =====\n"
-                )
-
-                text += page_text
-
-    except Exception as e:
-
-        st.error(
-            f"PDF 读取失败：{e}"
-        )
-
-    return text
-
-
-def read_word_file(uploaded_file):
-
-    text = ""
-
-    try:
-
-        document = Document(
-            uploaded_file
-        )
-
-        for paragraph in document.paragraphs:
-
-            value = (
-                paragraph.text.strip()
-            )
-
-            if value:
-
-                text += (
-                    value
-                    + "\n"
-                )
-
-        for table in document.tables:
-
-            text += (
-                "\n===== 表格 =====\n"
-            )
-
-            for row in table.rows:
-
-                text += (
-                    " | ".join(
-                        cell.text.strip()
-                        for cell in row.cells
-                    )
-                    + "\n"
-                )
-
-    except Exception as e:
-
-        st.error(
-            f"Word 读取失败：{e}"
-        )
-
-    return text
-
-
-def extract_requirement(uploaded_file):
-
-    if uploaded_file is None:
-        return ""
-
-    name = (
-        uploaded_file.name.lower()
-    )
-
-    if name.endswith(
-        (".txt", ".md")
-    ):
-
-        return read_text_file(
-            uploaded_file
-        )
-
-    if name.endswith(
-        ".pdf"
-    ):
-
-        return read_pdf_file(
-            uploaded_file
-        )
-
-    if name.endswith(
-        ".docx"
-    ):
-
-        return read_word_file(
-            uploaded_file
-        )
-
-    return ""
-
-
-# =========================================================
-# 8. 测试用例工具
-# =========================================================
-
-def normalize_case_ids(test_cases):
-
-    for index, case in enumerate(
-        test_cases,
-        start=1
-    ):
-
-        case[
-            "case_id"
-        ] = f"TC{index:03d}"
-
-    return test_cases
-
-
-def test_cases_to_dataframe(test_cases):
-
-    rows = []
-
-    for case in test_cases:
-
-        rows.append(
-            {
-                "用例编号":
-                    case.get(
-                        "case_id",
-                        ""
-                    ),
-
-                "测试模块":
-                    case.get(
-                        "module",
-                        ""
-                    ),
-
-                "测试标题":
-                    case.get(
-                        "title",
-                        ""
-                    ),
-
-                "前置条件":
-                    case.get(
-                        "precondition",
-                        ""
-                    ),
-
-                "操作步骤":
-                    case.get(
-                        "steps",
-                        ""
-                    ),
-
-                "测试数据":
-                    case.get(
-                        "test_data",
-                        ""
-                    ),
-
-                "预期结果":
-                    case.get(
-                        "expected_result",
-                        ""
-                    ),
-
-                "优先级":
-                    case.get(
-                        "priority",
-                        ""
-                    )
-            }
-        )
-
-    return pd.DataFrame(
-        rows
-    )
-
-
-def dataframe_to_test_cases(dataframe):
-
-    cases = []
-
-    for _, row in dataframe.iterrows():
-
-        cases.append(
-            {
-                "case_id":
-                    str(
-                        row.get(
-                            "用例编号",
-                            ""
-                        )
-                    ),
-
-                "module":
-                    str(
-                        row.get(
-                            "测试模块",
-                            ""
-                        )
-                    ),
-
-                "title":
-                    str(
-                        row.get(
-                            "测试标题",
-                            ""
-                        )
-                    ),
-
-                "precondition":
-                    str(
-                        row.get(
-                            "前置条件",
-                            ""
-                        )
-                    ),
-
-                "steps":
-                    str(
-                        row.get(
-                            "操作步骤",
-                            ""
-                        )
-                    ),
-
-                "test_data":
-                    str(
-                        row.get(
-                            "测试数据",
-                            ""
-                        )
-                    ),
-
-                "expected_result":
-                    str(
-                        row.get(
-                            "预期结果",
-                            ""
-                        )
-                    ),
-
-                "priority":
-                    str(
-                        row.get(
-                            "优先级",
-                            ""
-                        )
-                    )
-            }
-        )
-
-    return cases
-
-
-# =========================================================
-# 9. Excel
-# =========================================================
-
-def create_excel(
-    test_cases,
-    rtm_result
-):
-
-    wb = Workbook()
-
-    thin = Side(
-        style="thin"
-    )
-
-    border = Border(
-        left=thin,
-        right=thin,
-        top=thin,
-        bottom=thin
-    )
-
-    # =====================================================
-    # Sheet 1 测试用例
-    # =====================================================
-
-    ws = wb.active
-
-    ws.title = "测试用例"
-
-    headers = [
-        "用例编号",
-        "测试模块",
-        "测试标题",
-        "前置条件",
-        "操作步骤",
-        "测试数据",
-        "预期结果",
-        "优先级"
-    ]
-
-    ws.append(
-        headers
-    )
-
-    for case in test_cases:
-
-        ws.append(
-            [
-                case.get(
-                    "case_id",
-                    ""
-                ),
-                case.get(
-                    "module",
-                    ""
-                ),
-                case.get(
-                    "title",
-                    ""
-                ),
-                case.get(
-                    "precondition",
-                    ""
-                ),
-                case.get(
-                    "steps",
-                    ""
-                ),
-                case.get(
-                    "test_data",
-                    ""
-                ),
-                case.get(
-                    "expected_result",
-                    ""
-                ),
-                case.get(
-                    "priority",
-                    ""
-                )
-            ]
-        )
-
-    for cell in ws[1]:
-
-        cell.font = Font(
-            bold=True
-        )
-
-        cell.border = border
-
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center"
-        )
-
-    for row in ws.iter_rows(
-        min_row=2
-    ):
-
-        for cell in row:
-
-            cell.border = border
-
-            cell.alignment = Alignment(
-                vertical="top",
-                wrap_text=True
-            )
-
-    widths = {
-        "A": 12,
-        "B": 16,
-        "C": 32,
-        "D": 30,
-        "E": 50,
-        "F": 35,
-        "G": 45,
-        "H": 10
-    }
-
-    for column, width in (
-        widths.items()
-    ):
-
-        ws.column_dimensions[
-            column
-        ].width = width
-
-    ws.freeze_panes = "A2"
-
-    ws.auto_filter.ref = (
-        ws.dimensions
-    )
-
-    # =====================================================
-    # Sheet 2 RTM
-    # =====================================================
-
-    if rtm_result:
-
-        rtm_ws = wb.create_sheet(
-            "需求追踪矩阵"
-        )
-
-        rtm_ws.append(
-            [
-                "需求编号",
-                "需求内容",
-                "需求类型",
-                "覆盖用例",
-                "覆盖状态",
-                "说明"
-            ]
-        )
-
-        for item in rtm_result:
-
-            covered_cases = item.get(
-                "covered_cases",
-                []
-            )
-
-            if isinstance(
-                covered_cases,
-                list
-            ):
-
-                covered_cases = (
-                    "、".join(
-                        covered_cases
-                    )
-                )
-
-            rtm_ws.append(
-                [
-                    item.get(
-                        "requirement_id",
-                        ""
-                    ),
-                    item.get(
-                        "requirement",
-                        ""
-                    ),
-                    item.get(
-                        "requirement_type",
-                        ""
-                    ),
-                    covered_cases,
-                    item.get(
-                        "coverage_status",
-                        ""
-                    ),
-                    item.get(
-                        "note",
-                        ""
-                    )
-                ]
-            )
-
-        for cell in rtm_ws[1]:
-
-            cell.font = Font(
-                bold=True
-            )
-
-            cell.border = border
-
-            cell.alignment = Alignment(
-                horizontal="center",
-                vertical="center"
-            )
-
-        for row in rtm_ws.iter_rows(
-            min_row=2
-        ):
-
-            for cell in row:
-
-                cell.border = border
-
-                cell.alignment = Alignment(
-                    vertical="top",
-                    wrap_text=True
-                )
-
-        rtm_widths = {
-            "A": 12,
-            "B": 50,
-            "C": 18,
-            "D": 30,
-            "E": 15,
-            "F": 45
-        }
-
-        for column, width in (
-            rtm_widths.items()
-        ):
-
-            rtm_ws.column_dimensions[
-                column
-            ].width = width
-
-        rtm_ws.freeze_panes = "A2"
-
-    output = BytesIO()
-
-    wb.save(
-        output
-    )
-
-    output.seek(
-        0
-    )
-
-    return output
-
-
-# =========================================================
-# 10. Sidebar
+# 7. Sidebar
 # =========================================================
 
 with st.sidebar:
 
-    st.markdown(
-        "## 🧪 AI 软件测试平台"
-    )
+    st.title("🧪 AI 测试平台")
 
     st.caption(
-        "智能测试设计与质量分析"
+        "功能测试 · RAG · RTM · Bug 分析"
     )
 
     st.divider()
 
-    st.markdown(
-        "### 📚 测试知识库"
-    )
+    st.subheader("📚 测试知识库")
 
     knowledge_files = (
-        st.file_uploader(
-            "上传知识文件",
-            type=[
-                "txt",
-                "md",
-                "pdf",
-                "docx"
-            ],
-            accept_multiple_files=True,
-            key="knowledge_upload"
-        )
+        get_knowledge_file_list()
     )
+
+    st.metric(
+        "知识文件",
+        len(knowledge_files),
+    )
+
+    if st.button(
+        "🔄 重建 RAG 知识库",
+        width="stretch",
+    ):
+
+        try:
+
+            with st.spinner(
+                "正在重新构建向量知识库..."
+            ):
+
+                rebuild_vector_db()
+
+            st.success(
+                "RAG 知识库重建完成"
+            )
+
+        except Exception as e:
+
+            st.error(
+                f"知识库重建失败：{e}"
+            )
 
     if knowledge_files:
 
-        if st.button(
-            "保存并更新知识库",
-            use_container_width=True
-        ):
-
-            try:
-
-                for uploaded_file in (
-                    knowledge_files
-                ):
-
-                    safe_name = (
-                        os.path.basename(
-                            uploaded_file.name
-                        )
-                    )
-
-                    save_path = (
-                        os.path.join(
-                            KNOWLEDGE_DIR,
-                            safe_name
-                        )
-                    )
-
-                    with open(
-                        save_path,
-                        "wb"
-                    ) as f:
-
-                        f.write(
-                            uploaded_file.getbuffer()
-                        )
-
-                with st.spinner(
-                    "正在更新知识库..."
-                ):
-
-                    rebuild_vector_db()
-
-                st.success(
-                    "知识库更新成功"
-                )
-
-                st.rerun()
-
-            except Exception as e:
-
-                st.error(
-                    f"知识库更新失败：{e}"
-                )
-
-    st.divider()
-
-    try:
-
-        knowledge_file_list = (
-            get_knowledge_file_list()
+        selected_knowledge_file = st.selectbox(
+            "查看知识文件",
+            knowledge_files,
         )
 
-    except Exception:
-
-        knowledge_file_list = []
-
-    if knowledge_file_list:
-
-        selected_file = (
-            st.selectbox(
-                "当前知识文件",
-                knowledge_file_list
-            )
+        col_preview, col_delete = st.columns(
+            2
         )
 
-        preview_col1, preview_col2 = (
-            st.columns(2)
-        )
-
-        with preview_col1:
+        with col_preview:
 
             if st.button(
                 "查看",
-                use_container_width=True
+                width="stretch",
             ):
 
-                st.session_state[
-                    "knowledge_preview_name"
-                ] = selected_file
+                try:
 
-                st.session_state[
-                    "knowledge_preview"
-                ] = (
-                    get_knowledge_file_content(
-                        selected_file
+                    st.session_state[
+                        "knowledge_preview"
+                    ] = get_knowledge_file_content(
+                        selected_knowledge_file
                     )
-                )
 
-        with preview_col2:
+                except Exception as e:
+
+                    st.error(
+                        f"读取失败：{e}"
+                    )
+
+        with col_delete:
 
             if st.button(
                 "删除",
-                use_container_width=True
+                width="stretch",
             ):
 
-                if delete_knowledge_file(
-                    selected_file
-                ):
+                try:
 
-                    with st.spinner(
-                        "正在更新知识库..."
-                    ):
-
-                        rebuild_vector_db()
-
-                    st.session_state.pop(
-                        "knowledge_preview",
-                        None
+                    delete_knowledge_file(
+                        selected_knowledge_file
                     )
 
-                    st.session_state.pop(
-                        "knowledge_preview_name",
-                        None
+                    rebuild_vector_db()
+
+                    st.success(
+                        "文件已删除"
                     )
 
                     st.rerun()
 
-    else:
+                except Exception as e:
 
-        st.info(
-            "知识库暂无文件"
-        )
+                    st.error(
+                        f"删除失败：{e}"
+                    )
+
+        if st.session_state.knowledge_preview:
+
+            with st.expander(
+                "知识文件内容",
+                expanded=False,
+            ):
+
+                st.text(
+                    st.session_state.knowledge_preview[
+                        :10000
+                    ]
+                )
 
     st.divider()
 
-    st.markdown(
-        "### 📊 当前测试状态"
+    st.subheader("📊 当前分析")
+
+    st.metric(
+        "测试用例",
+        len(
+            st.session_state.test_cases
+        ),
     )
 
-    sidebar_cases = (
-        st.session_state[
-            "test_cases"
-        ]
+    st.metric(
+        "需求条目",
+        len(
+            st.session_state.requirement_items
+        ),
     )
 
-    total_sidebar = len(
-        sidebar_cases
+    st.metric(
+        "RTM 条目",
+        len(
+            st.session_state.rtm_result
+        ),
     )
 
-    p0_sidebar = sum(
-        case.get(
-            "priority"
-        ) == "P0"
-        for case in sidebar_cases
-    )
+    st.divider()
 
-    p1_sidebar = sum(
-        case.get(
-            "priority"
-        ) == "P1"
-        for case in sidebar_cases
-    )
+    if st.button(
+        "🗑 清空当前结果",
+        width="stretch",
+    ):
 
-    p2_sidebar = sum(
-        case.get(
-            "priority"
-        ) == "P2"
-        for case in sidebar_cases
-    )
+        reset_analysis_state()
 
-    side1, side2 = st.columns(
-        2
-    )
+        st.session_state.bug_analysis = None
 
-    side1.metric(
-        "用例",
-        total_sidebar
-    )
-
-    side2.metric(
-        "P0",
-        p0_sidebar
-    )
-
-    side3, side4 = st.columns(
-        2
-    )
-
-    side3.metric(
-        "P1",
-        p1_sidebar
-    )
-
-    side4.metric(
-        "P2",
-        p2_sidebar
-    )
+        st.rerun()
 
 
 # =========================================================
-# 11. Hero
+# 8. Hero
 # =========================================================
 
 st.markdown(
@@ -1194,1507 +476,1030 @@ st.markdown(
 <div class="hero-card">
 
 <div class="hero-title">
-🧪 AI 软件测试平台
+🧪 AI 软件测试用例生成与质量评估平台
 </div>
 
 <div class="hero-description">
-智能完成需求分析、测试点设计、测试用例生成、
-质量评估、需求追踪、测试风险分析与经验沉淀。
+从需求评审、测试点分析、RAG 历史经验检索，
+到测试用例生成、AI 补漏去重、质量评分、
+RTM 需求追踪和 Bug 分析。
 </div>
 
 <span class="feature-chip">需求评审</span>
-<span class="feature-chip">测试设计</span>
-<span class="feature-chip">质量评估</span>
-<span class="feature-chip">需求追踪</span>
+<span class="feature-chip">RAG</span>
+<span class="feature-chip">测试点</span>
+<span class="feature-chip">测试用例</span>
+<span class="feature-chip">质量评分</span>
+<span class="feature-chip">RTM</span>
 <span class="feature-chip">Bug 分析</span>
 
 </div>
 """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 
 # =========================================================
-# 12. 知识库预览
-# =========================================================
-
-if "knowledge_preview" in st.session_state:
-
-    with st.expander(
-        "📖 知识库文件预览"
-    ):
-
-        st.caption(
-            st.session_state.get(
-                "knowledge_preview_name",
-                ""
-            )
-        )
-
-        st.text_area(
-            "文件内容",
-            value=st.session_state[
-                "knowledge_preview"
-            ],
-            height=300,
-            disabled=True
-        )
-
-
-# =========================================================
-# 13. 需求输入
+# 9. 需求输入
 # =========================================================
 
 st.markdown(
-    '<div class="section-title">'
-    '① 需求输入'
-    '</div>',
-    unsafe_allow_html=True
+    '<div class="section-title">① 输入测试需求</div>',
+    unsafe_allow_html=True,
 )
 
 st.markdown(
-    '<div class="section-desc">'
-    '输入产品需求，或上传需求文档进行智能测试分析。'
-    '</div>',
-    unsafe_allow_html=True
+    """
+<div class="section-desc">
+可以直接输入需求，也可以上传 TXT、MD、PDF、DOCX 文档。
+</div>
+""",
+    unsafe_allow_html=True,
 )
 
-with st.container(
-    border=True
-):
+input_mode = st.radio(
+    "需求输入方式",
+    [
+        "手动输入",
+        "上传需求文档",
+    ],
+    horizontal=True,
+)
 
-    input_method = st.radio(
-        "需求输入方式",
-        [
-            "手动输入",
-            "上传需求文档"
+requirement = ""
+
+if input_mode == "手动输入":
+
+    requirement = st.text_area(
+        "需求内容",
+        height=260,
+        placeholder=(
+            "例如：\n"
+            "用户输入手机号和验证码登录系统。\n"
+            "手机号必须为 11 位...\n"
+        ),
+    )
+
+else:
+
+    uploaded_file = st.file_uploader(
+        "上传需求文件",
+        type=[
+            "txt",
+            "md",
+            "pdf",
+            "docx",
         ],
-        horizontal=True
     )
 
-    requirement = ""
+    if uploaded_file is not None:
 
-    if input_method == "手动输入":
+        try:
 
-        requirement = st.text_area(
-            "需求内容",
-            height=260,
-            placeholder="""
-例如：
-
-用户通过手机号和密码登录。
-
-手机号不能为空。
-密码不能为空。
-
-手机号必须为11位数字。
-
-密码连续输错5次后，
-账号锁定30分钟。
-
-登录成功后进入首页。
-"""
-        )
-
-    else:
-
-        uploaded_requirement = (
-            st.file_uploader(
-                "上传需求文档",
-                type=[
-                    "txt",
-                    "md",
-                    "pdf",
-                    "docx"
-                ],
-                key="requirement_upload"
+            requirement = extract_requirement(
+                uploaded_file
             )
-        )
 
-        if uploaded_requirement:
+            st.success(
+                f"文件解析成功，共提取 "
+                f"{len(requirement)} 个字符"
+            )
 
-            parsed_requirement = (
-                extract_requirement(
-                    uploaded_requirement
+            with st.expander(
+                "查看解析后的需求",
+                expanded=False,
+            ):
+
+                st.text_area(
+                    "文档内容",
+                    requirement,
+                    height=300,
+                    disabled=True,
                 )
+
+        except Exception as e:
+
+            st.error(
+                f"需求文件解析失败：{e}"
             )
 
-            requirement = st.text_area(
-                "解析后的需求内容",
-                value=parsed_requirement,
-                height=280
-            )
-
-    start_col1, start_col2 = (
-        st.columns(
-            [
-                1,
-                4
-            ]
-        )
-    )
-
-    with start_col1:
-
-        start_analysis = st.button(
-            "🚀 开始智能测试分析",
-            type="primary",
-            use_container_width=True
-        )
-
-    with start_col2:
-
-        st.caption(
-            "系统将依次完成：需求评审 → 测试点 → 测试用例"
-        )
+            requirement = ""
 
 
 # =========================================================
-# 14. 主分析流程
+# 10. 一键分析需求
 # =========================================================
 
-if start_analysis:
+st.markdown(
+    '<div class="section-title">② AI 测试分析</div>',
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+<div class="section-desc">
+系统将按照：RAG 检索 → 需求评审 → 测试点 → 测试用例 的流程执行。
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+if st.button(
+    "🚀 开始生成测试方案",
+    type="primary",
+    width="stretch",
+):
 
     if not requirement.strip():
 
         st.warning(
-            "请先输入需求内容。"
+            "请先输入或上传测试需求"
         )
 
-        st.stop()
+    else:
 
-    st.session_state[
-        "current_requirement"
-    ] = requirement
+        reset_analysis_state()
 
-    st.session_state[
-        "quality_result"
-    ] = None
+        st.session_state[
+            "current_requirement"
+        ] = requirement.strip()
 
-    st.session_state[
-        "rtm_result"
-    ] = []
+        try:
 
-    st.session_state[
-        "requirement_items"
-    ] = []
+            # =============================================
+            # RAG
+            # =============================================
 
-    # =====================================================
-    # RAG
-    # =====================================================
+            with st.status(
+                "正在执行 AI 测试分析...",
+                expanded=True,
+            ) as status:
 
-    try:
-
-        with st.spinner(
-            "正在检索测试经验..."
-        ):
-
-            rag_context = (
-                get_rag_context(
-                    requirement,
-                    k=4
+                st.write(
+                    "① 检索 RAG 测试知识库..."
                 )
-            )
 
-    except Exception as e:
+                try:
 
-        rag_context = (
-            f"知识检索失败：{e}"
-        )
+                    rag_context = get_rag_context(
+                        requirement
+                    )
 
-    st.session_state[
-        "rag_context"
-    ] = rag_context
+                except Exception as e:
 
-    # =====================================================
-    # 需求评审
-    # =====================================================
+                    rag_context = ""
 
-    review_prompt = build_review_prompt(
-        requirement,
-        rag_context
-    )
+                    st.warning(
+                        f"RAG 检索失败，将继续使用当前需求分析：{e}"
+                    )
 
-    try:
+                st.session_state[
+                    "rag_context"
+                ] = rag_context or ""
 
-        with st.spinner(
-            "正在进行需求评审..."
-        ):
+                # =========================================
+                # 需求评审
+                # =========================================
 
-            review_response = (
-                model.invoke(
+                st.write(
+                    "② AI 需求评审..."
+                )
+
+                review_prompt = (
+                    build_review_prompt(
+                        requirement,
+                        rag_context,
+                    )
+                )
+
+                review_content = invoke_model(
                     review_prompt
                 )
-            )
 
-    except Exception as e:
+                st.session_state[
+                    "review_content"
+                ] = review_content
 
-        st.error(
-            f"需求评审失败：{e}"
-        )
+                # =========================================
+                # 测试点
+                # =========================================
 
-        st.stop()
-
-    review_content = (
-        review_response.content
-    )
-
-    st.session_state[
-        "review_content"
-    ] = review_content
-
-    # =====================================================
-    # 测试点
-    # =====================================================
-
-    analysis_prompt = build_test_point_prompt(
-        requirement,
-        review_content,
-        rag_context
-    )
-
-    try:
-
-        with st.spinner(
-            "正在设计测试点..."
-        ):
-
-            analysis_response = (
-                model.invoke(
-                    analysis_prompt
+                st.write(
+                    "③ 生成测试点..."
                 )
-            )
 
-    except Exception as e:
-
-        st.error(
-            f"测试点分析失败：{e}"
-        )
-
-        st.stop()
-
-    analysis_content = (
-        analysis_response.content
-    )
-
-    st.session_state[
-        "analysis_content"
-    ] = analysis_content
-
-    # =====================================================
-    # 测试用例
-    # =====================================================
-
-    case_prompt = build_test_case_prompt(
-        requirement,
-        review_content,
-        analysis_content,
-        rag_context
-    )
-
-    try:
-
-        with st.spinner(
-            "正在生成测试用例..."
-        ):
-
-            case_response = (
-                model.invoke(
-                    case_prompt
+                test_point_prompt = (
+                    build_test_point_prompt(
+                        requirement,
+                        review_content,
+                        rag_context,
+                    )
                 )
+
+                analysis_content = invoke_model(
+                    test_point_prompt
+                )
+
+                st.session_state[
+                    "analysis_content"
+                ] = analysis_content
+
+                # =========================================
+                # 测试用例
+                # =========================================
+
+                st.write(
+                    "④ 生成结构化测试用例..."
+                )
+
+                test_case_prompt = (
+                    build_test_case_prompt(
+                        requirement,
+                        review_content,
+                        analysis_content,
+                        rag_context,
+                    )
+                )
+
+                case_content = invoke_model(
+                    test_case_prompt
+                )
+
+                test_cases = parse_json_list(
+                    case_content
+                )
+
+                if not test_cases:
+
+                    raise ValueError(
+                        "AI 返回的测试用例无法解析为 JSON"
+                    )
+
+                test_cases = normalize_case_ids(
+                    test_cases,
+                    prefix="TC",
+                )
+
+                st.session_state[
+                    "test_cases"
+                ] = test_cases
+
+                status.update(
+                    label="AI 测试分析完成",
+                    state="complete",
+                    expanded=False,
+                )
+
+            st.success(
+                f"生成完成，共生成 "
+                f"{len(test_cases)} 条测试用例"
             )
 
-    except Exception as e:
+        except Exception as e:
 
-        st.error(
-            f"测试用例生成失败：{e}"
-        )
-
-        st.stop()
-
-    test_cases = parse_json_list(
-        case_response.content
-    )
-
-    if test_cases is None:
-
-        st.error(
-            "测试用例数据解析失败。"
-        )
-
-        with st.expander(
-            "查看原始返回内容"
-        ):
-
-            st.code(
-                case_response.content
+            st.error(
+                f"测试方案生成失败：{e}"
             )
-
-        st.stop()
-
-    st.session_state[
-        "test_cases"
-    ] = normalize_case_ids(
-        test_cases
-    )
-
-    st.success(
-        f"分析完成，共生成 {len(test_cases)} 条测试用例。"
-    )
 
 
 # =========================================================
-# 15. 分析结果
+# 11. AI 分析结果
 # =========================================================
 
 if (
-    st.session_state[
-        "review_content"
-    ]
-    or st.session_state[
-        "analysis_content"
-    ]
+    st.session_state.review_content
+    or st.session_state.analysis_content
 ):
 
-    st.divider()
-
     st.markdown(
-        '<div class="section-title">'
-        '② 智能分析结果'
-        '</div>',
-        unsafe_allow_html=True
+        '<div class="section-title">③ AI 分析结果</div>',
+        unsafe_allow_html=True,
     )
 
-    review_tab, point_tab, knowledge_tab = (
+    tab_review, tab_points, tab_rag = (
         st.tabs(
             [
-                "📋 需求评审",
-                "🎯 测试点",
-                "📚 测试经验参考"
+                "需求评审",
+                "测试点",
+                "RAG参考",
             ]
         )
     )
 
-    with review_tab:
+    with tab_review:
 
         st.markdown(
-            st.session_state[
-                "review_content"
-            ]
+            st.session_state.review_content
+            or "暂无结果"
         )
 
-    with point_tab:
+    with tab_points:
 
         st.markdown(
-            st.session_state[
-                "analysis_content"
-            ]
+            st.session_state.analysis_content
+            or "暂无结果"
         )
 
-    with knowledge_tab:
+    with tab_rag:
 
-        st.text(
-            st.session_state[
-                "rag_context"
-            ]
-        )
+        if st.session_state.rag_context:
+
+            st.text(
+                st.session_state.rag_context
+            )
+
+        else:
+
+            st.info(
+                "本次没有检索到相关历史知识"
+            )
 
 
 # =========================================================
-# 16. 测试用例
+# 12. 测试用例
 # =========================================================
 
-if st.session_state[
-    "test_cases"
-]:
-
-    st.divider()
+if st.session_state.test_cases:
 
     st.markdown(
-        '<div class="section-title">'
-        '③ 测试用例'
-        '</div>',
-        unsafe_allow_html=True
+        '<div class="section-title">④ 测试用例</div>',
+        unsafe_allow_html=True,
     )
 
-    st.caption(
-        "支持直接编辑、新增和删除测试用例。"
+    current_cases = normalize_case_ids(
+        st.session_state.test_cases,
+        prefix="TC",
     )
 
-    dataframe = (
-        test_cases_to_dataframe(
-            st.session_state[
-                "test_cases"
-            ]
+    st.session_state.test_cases = (
+        current_cases
+    )
+
+    case_dataframe = (
+        functional_cases_to_dataframe(
+            current_cases
         )
     )
 
-    edited_df = st.data_editor(
-        dataframe,
-        use_container_width=True,
+    edited_dataframe = st.data_editor(
+        case_dataframe,
+        width="stretch",
         hide_index=True,
         num_rows="dynamic",
-        height=450,
-        key="test_case_editor",
-        column_config={
-            "用例编号":
-                st.column_config.TextColumn(
-                    "用例编号",
-                    width="small"
-                ),
-
-            "测试标题":
-                st.column_config.TextColumn(
-                    "测试标题",
-                    width="large"
-                ),
-
-            "优先级":
-                st.column_config.SelectboxColumn(
-                    "优先级",
-                    options=[
-                        "P0",
-                        "P1",
-                        "P2"
-                    ],
-                    width="small"
-                )
-        }
+        key="functional_case_editor",
     )
 
-    current_cases = (
-        dataframe_to_test_cases(
-            edited_df
+    st.session_state.test_cases = (
+        dataframe_to_functional_cases(
+            edited_dataframe
         )
     )
 
-    save_col1, save_col2 = (
-        st.columns(
-            [
-                1,
-                4
-            ]
+    st.session_state.test_cases = (
+        normalize_case_ids(
+            st.session_state.test_cases,
+            prefix="TC",
         )
     )
 
-    with save_col1:
+    # =============================================
+    # 用例统计
+    # =============================================
 
-        save_cases = st.button(
-            "💾 保存修改",
-            use_container_width=True
-        )
-
-    if save_cases:
-
-        current_cases = (
-            normalize_case_ids(
-                current_cases
-            )
-        )
-
-        st.session_state[
-            "test_cases"
-        ] = current_cases
-
-        st.session_state[
-            "quality_result"
-        ] = None
-
-        st.session_state[
-            "rtm_result"
-        ] = []
-
-        st.success(
-            "测试用例修改已保存。"
-        )
-
-        st.rerun()
-
-    current_requirement = (
-        st.session_state[
-            "current_requirement"
-        ]
+    p0_count = sum(
+        1
+        for case in st.session_state.test_cases
+        if case.get("priority") == "P0"
     )
 
-    current_analysis = (
-        st.session_state[
-            "analysis_content"
-        ]
+    p1_count = sum(
+        1
+        for case in st.session_state.test_cases
+        if case.get("priority") == "P1"
     )
 
-    current_rag = (
-        st.session_state[
-            "rag_context"
-        ]
+    p2_count = sum(
+        1
+        for case in st.session_state.test_cases
+        if case.get("priority") == "P2"
     )
 
-    # =====================================================
-    # 17. 智能优化
-    # =====================================================
+    col1, col2, col3, col4 = st.columns(
+        4
+    )
+
+    col1.metric(
+        "全部用例",
+        len(st.session_state.test_cases),
+    )
+
+    col2.metric(
+        "P0",
+        p0_count,
+    )
+
+    col3.metric(
+        "P1",
+        p1_count,
+    )
+
+    col4.metric(
+        "P2",
+        p2_count,
+    )
+
+
+# =========================================================
+# 13. AI 用例优化
+# =========================================================
+
+if st.session_state.test_cases:
 
     st.markdown(
-        '<div class="section-title">'
-        '④ 智能用例优化'
-        '</div>',
-        unsafe_allow_html=True
+        '<div class="section-title">⑤ AI 用例优化</div>',
+        unsafe_allow_html=True,
     )
 
-    st.markdown(
-        '<div class="section-desc">'
-        '检查遗漏、重复及用例设计质量。'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-    optimize_col1, optimize_col2, optimize_col3 = (
+    col_add, col_duplicate, col_all = (
         st.columns(3)
     )
 
-    with optimize_col1:
+    with col_add:
 
         add_missing = st.button(
-            "➕ 补充遗漏用例",
-            use_container_width=True
+            "➕ AI 补充遗漏用例",
+            width="stretch",
         )
 
-    with optimize_col2:
+    with col_duplicate:
 
         remove_duplicate = st.button(
-            "🧹 删除重复用例",
-            use_container_width=True
+            "🧹 AI 删除重复用例",
+            width="stretch",
         )
 
-    with optimize_col3:
+    with col_all:
 
         optimize_all = st.button(
-            "✨ 全面优化用例",
-            type="primary",
-            use_container_width=True
+            "✨ AI 全面优化",
+            width="stretch",
         )
 
-    # =====================================================
-    # 补充遗漏
-    # =====================================================
+    current_cases_json = json.dumps(
+        st.session_state.test_cases,
+        ensure_ascii=False,
+        indent=2,
+    )
 
     if add_missing:
 
-        prompt = build_add_missing_prompt(
-            current_requirement,
-            current_analysis,
-            current_rag,
-            json.dumps(
-                current_cases,
-                ensure_ascii=False
-            )
-        )
-
         try:
 
             with st.spinner(
-                "正在检查遗漏..."
+                "AI 正在检查遗漏场景..."
             ):
 
-                response = (
-                    model.invoke(
-                        prompt
+                prompt = build_add_missing_prompt(
+                    st.session_state.current_requirement,
+                    st.session_state.analysis_content,
+                    st.session_state.rag_context,
+                    current_cases_json,
+                )
+
+                result_content = invoke_model(
+                    prompt
+                )
+
+                result = parse_json_list(
+                    result_content
+                )
+
+                if not result:
+
+                    raise ValueError(
+                        "AI 返回结果无法解析"
+                    )
+
+                st.session_state.test_cases = (
+                    normalize_case_ids(
+                        result,
+                        prefix="TC",
                     )
                 )
 
-            optimized = (
-                parse_json_list(
-                    response.content
-                )
+            st.success(
+                "遗漏用例补充完成"
             )
-
-        except Exception as e:
-
-            optimized = None
-
-            st.error(
-                f"用例补充失败：{e}"
-            )
-
-        if optimized:
-
-            st.session_state[
-                "test_cases"
-            ] = normalize_case_ids(
-                optimized
-            )
-
-            st.session_state[
-                "quality_result"
-            ] = None
-
-            st.session_state[
-                "rtm_result"
-            ] = []
 
             st.rerun()
 
-    # =====================================================
-    # 删除重复
-    # =====================================================
+        except Exception as e:
+
+            st.error(
+                f"补充失败：{e}"
+            )
 
     if remove_duplicate:
 
-        prompt = build_remove_duplicate_prompt(
-            json.dumps(
-                current_cases,
-                ensure_ascii=False
-            )
-        )
-
         try:
 
             with st.spinner(
-                "正在检查重复用例..."
+                "AI 正在检查重复用例..."
             ):
 
-                response = (
-                    model.invoke(
-                        prompt
+                prompt = (
+                    build_remove_duplicate_prompt(
+                        current_cases_json
                     )
                 )
 
-            optimized = (
-                parse_json_list(
-                    response.content
+                result_content = invoke_model(
+                    prompt
                 )
+
+                result = parse_json_list(
+                    result_content
+                )
+
+                if not result:
+
+                    raise ValueError(
+                        "AI 返回结果无法解析"
+                    )
+
+                st.session_state.test_cases = (
+                    normalize_case_ids(
+                        result,
+                        prefix="TC",
+                    )
+                )
+
+            st.success(
+                "重复用例清理完成"
             )
-
-        except Exception as e:
-
-            optimized = None
-
-            st.error(
-                f"用例去重失败：{e}"
-            )
-
-        if optimized:
-
-            st.session_state[
-                "test_cases"
-            ] = normalize_case_ids(
-                optimized
-            )
-
-            st.session_state[
-                "quality_result"
-            ] = None
-
-            st.session_state[
-                "rtm_result"
-            ] = []
 
             st.rerun()
 
-    # =====================================================
-    # 全面优化
-    # =====================================================
+        except Exception as e:
+
+            st.error(
+                f"去重失败：{e}"
+            )
 
     if optimize_all:
 
-        prompt = build_optimize_all_prompt(
-            current_requirement,
-            current_analysis,
-            current_rag,
-            json.dumps(
-                current_cases,
-                ensure_ascii=False
-            )
-        )
-
         try:
 
             with st.spinner(
-                "正在全面优化测试用例..."
+                "AI 正在全面优化测试用例..."
             ):
 
-                response = (
-                    model.invoke(
-                        prompt
+                prompt = (
+                    build_optimize_all_prompt(
+                        st.session_state.current_requirement,
+                        st.session_state.analysis_content,
+                        st.session_state.rag_context,
+                        current_cases_json,
                     )
                 )
 
-            optimized = (
-                parse_json_list(
-                    response.content
+                result_content = invoke_model(
+                    prompt
                 )
+
+                result = parse_json_list(
+                    result_content
+                )
+
+                if not result:
+
+                    raise ValueError(
+                        "AI 返回结果无法解析"
+                    )
+
+                st.session_state.test_cases = (
+                    normalize_case_ids(
+                        result,
+                        prefix="TC",
+                    )
+                )
+
+            st.success(
+                "测试用例优化完成"
             )
-
-        except Exception as e:
-
-            optimized = None
-
-            st.error(
-                f"全面优化失败：{e}"
-            )
-
-        if optimized:
-
-            st.session_state[
-                "test_cases"
-            ] = normalize_case_ids(
-                optimized
-            )
-
-            st.session_state[
-                "quality_result"
-            ] = None
-
-            st.session_state[
-                "rtm_result"
-            ] = []
 
             st.rerun()
 
-    # =====================================================
-    # 18. 质量评估
-    # =====================================================
+        except Exception as e:
+
+            st.error(
+                f"优化失败：{e}"
+            )
+
+
+# =========================================================
+# 14. AI 用例质量评分
+# =========================================================
+
+if st.session_state.test_cases:
 
     st.markdown(
-        '<div class="section-title">'
-        '⑤ 测试质量评估'
-        '</div>',
-        unsafe_allow_html=True
+        '<div class="section-title">⑥ AI 用例质量评估</div>',
+        unsafe_allow_html=True,
     )
 
-    st.caption(
-        "从需求覆盖、边界、异常、业务规则和可执行性等维度进行评估。"
-    )
-
-    quality_col1, quality_col2 = (
-        st.columns(
-            [
-                1,
-                4
-            ]
-        )
-    )
-
-    with quality_col1:
-
-        quality_button = st.button(
-            "📊 开始质量评估",
-            type="primary",
-            use_container_width=True
-        )
-
-    if quality_button:
-
-        prompt = build_quality_prompt(
-            current_requirement,
-            current_analysis,
-            json.dumps(
-                current_cases,
-                ensure_ascii=False
-            )
-        )
+    if st.button(
+        "📊 开始质量评分",
+        width="stretch",
+    ):
 
         try:
 
             with st.spinner(
-                "正在评估测试质量..."
+                "正在评估测试用例质量..."
             ):
 
-                response = (
-                    model.invoke(
-                        prompt
+                cases_json = json.dumps(
+                    st.session_state.test_cases,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+
+                prompt = build_quality_prompt(
+                    st.session_state.current_requirement,
+                    st.session_state.analysis_content,
+                    cases_json,
+                )
+
+                quality_content = invoke_model(
+                    prompt
+                )
+
+                quality_result = (
+                    parse_json_dict(
+                        quality_content
                     )
                 )
 
-            quality_result = (
-                parse_json_dict(
-                    response.content
-                )
+                if not quality_result:
+
+                    raise ValueError(
+                        "AI 质量评分结果无法解析"
+                    )
+
+                st.session_state[
+                    "quality_result"
+                ] = quality_result
+
+            st.success(
+                "质量评估完成"
             )
 
         except Exception as e:
 
-            quality_result = None
-
             st.error(
-                f"质量评估失败：{e}"
+                f"质量评分失败：{e}"
             )
 
-        if quality_result:
 
-            st.session_state[
-                "quality_result"
-            ] = quality_result
+if st.session_state.quality_result:
 
-    quality_result = (
-        st.session_state[
-            "quality_result"
-        ]
+    quality = (
+        st.session_state.quality_result
     )
 
-    if quality_result:
+    score_columns = st.columns(
+        4
+    )
 
-        overall_score = int(
-            quality_result.get(
+    score_columns[0].metric(
+        "综合评分",
+        safe_score(
+            quality.get(
                 "overall_score",
-                0
+                0,
             )
+        ),
+    )
+
+    score_columns[1].metric(
+        "需求覆盖",
+        safe_score(
+            quality.get(
+                "requirement_coverage",
+                0,
+            )
+        ),
+    )
+
+    score_columns[2].metric(
+        "异常覆盖",
+        safe_score(
+            quality.get(
+                "exception_coverage",
+                0,
+            )
+        ),
+    )
+
+    score_columns[3].metric(
+        "可执行性",
+        safe_score(
+            quality.get(
+                "executability",
+                0,
+            )
+        ),
+    )
+
+    with st.expander(
+        "查看完整质量评估",
+        expanded=True,
+    ):
+
+        st.json(
+            quality
         )
 
-        quality1, quality2 = (
-            st.columns(
-                [
-                    1,
-                    3
-                ]
-            )
-        )
 
-        with quality1:
+# =========================================================
+# 15. RTM 需求追踪矩阵
+# =========================================================
 
-            st.metric(
-                "总体质量分",
-                f"{overall_score}/100"
-            )
-
-        with quality2:
-
-            st.progress(
-                min(
-                    max(
-                        overall_score,
-                        0
-                    ),
-                    100
-                )
-            )
-
-            st.write(
-                quality_result.get(
-                    "summary",
-                    ""
-                )
-            )
-
-        metric_items = [
-            (
-                "需求覆盖",
-                "requirement_coverage"
-            ),
-            (
-                "正常场景",
-                "normal_coverage"
-            ),
-            (
-                "异常场景",
-                "exception_coverage"
-            ),
-            (
-                "边界覆盖",
-                "boundary_coverage"
-            ),
-            (
-                "业务规则",
-                "business_rule_coverage"
-            ),
-            (
-                "可执行性",
-                "executability"
-            ),
-            (
-                "非重复",
-                "non_duplicate_score"
-            )
-        ]
-
-        quality_columns = st.columns(
-            7
-        )
-
-        for column, (
-            label,
-            key
-        ) in zip(
-            quality_columns,
-            metric_items
-        ):
-
-            column.metric(
-                label,
-                quality_result.get(
-                    key,
-                    0
-                )
-            )
-
-        quality_tab1, quality_tab2, quality_tab3, quality_tab4 = (
-            st.tabs(
-                [
-                    "✅ 优势",
-                    "⚠️ 遗漏",
-                    "🚨 高风险",
-                    "💡 优化建议"
-                ]
-            )
-        )
-
-        with quality_tab1:
-
-            for item in quality_result.get(
-                "strengths",
-                []
-            ):
-
-                st.write(
-                    f"• {item}"
-                )
-
-        with quality_tab2:
-
-            items = quality_result.get(
-                "missing_scenarios",
-                []
-            )
-
-            if items:
-
-                for item in items:
-
-                    st.write(
-                        f"• {item}"
-                    )
-
-            else:
-
-                st.success(
-                    "未发现明显遗漏"
-                )
-
-        with quality_tab3:
-
-            items = quality_result.get(
-                "high_risk_gaps",
-                []
-            )
-
-            if items:
-
-                for item in items:
-
-                    st.write(
-                        f"• {item}"
-                    )
-
-            else:
-
-                st.success(
-                    "未发现明显高风险遗漏"
-                )
-
-        with quality_tab4:
-
-            for item in quality_result.get(
-                "improvement_suggestions",
-                []
-            ):
-
-                st.write(
-                    f"• {item}"
-                )
-
-    # =====================================================
-    # 19. RTM
-    # =====================================================
+if st.session_state.test_cases:
 
     st.markdown(
-        '<div class="section-title">'
-        '⑥ 需求追踪矩阵'
-        '</div>',
-        unsafe_allow_html=True
+        '<div class="section-title">⑦ RTM 需求追踪矩阵</div>',
+        unsafe_allow_html=True,
     )
 
     st.caption(
-        "检查每条需求是否被测试用例真正覆盖。"
+        "将需求拆成最小可验证条目，再检查每条需求是否有测试用例覆盖。"
     )
 
-    rtm_col1, rtm_col2 = (
-        st.columns(
-            [
-                1,
-                4
-            ]
-        )
-    )
-
-    with rtm_col1:
-
-        generate_rtm = st.button(
-            "🔗 生成需求追踪矩阵",
-            use_container_width=True
-        )
-
-    if generate_rtm:
-
-        requirement_prompt = (
-            build_requirement_split_prompt(
-                current_requirement
-            )
-        )
+    if st.button(
+        "🔗 生成 RTM",
+        width="stretch",
+    ):
 
         try:
 
             with st.spinner(
-                "正在拆分需求..."
+                "正在拆解需求并生成 RTM..."
             ):
 
-                response = (
-                    model.invoke(
-                        requirement_prompt
+                # =========================================
+                # 需求拆分
+                # =========================================
+
+                split_prompt = (
+                    build_requirement_split_prompt(
+                        st.session_state.current_requirement
                     )
                 )
 
-            requirement_items = (
-                parse_json_list(
-                    response.content
+                split_content = invoke_model(
+                    split_prompt
                 )
-            )
 
-        except Exception as e:
-
-            requirement_items = None
-
-            st.error(
-                f"需求拆分失败：{e}"
-            )
-
-        if requirement_items:
-
-            st.session_state[
-                "requirement_items"
-            ] = requirement_items
-
-            rtm_prompt = build_rtm_prompt(
-                json.dumps(
-                    requirement_items,
-                    ensure_ascii=False
-                ),
-                json.dumps(
-                    current_cases,
-                    ensure_ascii=False
-                )
-            )
-
-            try:
-
-                with st.spinner(
-                    "正在建立需求追踪关系..."
-                ):
-
-                    response = (
-                        model.invoke(
-                            rtm_prompt
-                        )
-                    )
-
-                rtm_result = (
+                requirement_items = (
                     parse_json_list(
-                        response.content
+                        split_content
                     )
                 )
 
-            except Exception as e:
+                if not requirement_items:
 
-                rtm_result = None
+                    raise ValueError(
+                        "需求拆分结果解析失败"
+                    )
 
-                st.error(
-                    f"需求追踪生成失败：{e}"
+                st.session_state[
+                    "requirement_items"
+                ] = requirement_items
+
+                # =========================================
+                # RTM
+                # =========================================
+
+                requirement_items_json = (
+                    json.dumps(
+                        requirement_items,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
                 )
 
-            if rtm_result:
+                current_cases_json = (
+                    json.dumps(
+                        st.session_state.test_cases,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+
+                rtm_prompt = build_rtm_prompt(
+                    requirement_items_json,
+                    current_cases_json,
+                )
+
+                rtm_content = invoke_model(
+                    rtm_prompt
+                )
+
+                rtm_result = parse_json_list(
+                    rtm_content
+                )
+
+                if not rtm_result:
+
+                    raise ValueError(
+                        "RTM 结果无法解析"
+                    )
 
                 st.session_state[
                     "rtm_result"
                 ] = rtm_result
 
-                st.rerun()
-
-    rtm_result = (
-        st.session_state[
-            "rtm_result"
-        ]
-    )
-
-    if rtm_result:
-
-        rtm_rows = []
-
-        for item in rtm_result:
-
-            covered_cases = item.get(
-                "covered_cases",
-                []
+            st.success(
+                "RTM 生成完成"
             )
 
-            if isinstance(
-                covered_cases,
-                list
-            ):
+        except Exception as e:
 
-                covered_cases = (
-                    "、".join(
-                        covered_cases
-                    )
-                )
-
-            rtm_rows.append(
-                {
-                    "需求编号":
-                        item.get(
-                            "requirement_id",
-                            ""
-                        ),
-
-                    "需求内容":
-                        item.get(
-                            "requirement",
-                            ""
-                        ),
-
-                    "需求类型":
-                        item.get(
-                            "requirement_type",
-                            ""
-                        ),
-
-                    "覆盖用例":
-                        covered_cases,
-
-                    "覆盖状态":
-                        item.get(
-                            "coverage_status",
-                            ""
-                        ),
-
-                    "说明":
-                        item.get(
-                            "note",
-                            ""
-                        )
-                }
+            st.error(
+                f"RTM 生成失败：{e}"
             )
 
-        st.dataframe(
-            pd.DataFrame(
-                rtm_rows
-            ),
-            use_container_width=True,
-            hide_index=True
-        )
 
-    # =====================================================
-    # 20. Dashboard
-    # =====================================================
+if st.session_state.rtm_result:
 
-    st.markdown(
-        '<div class="section-title">'
-        '⑦ 测试质量 Dashboard'
-        '</div>',
-        unsafe_allow_html=True
+    rtm_dataframe = pd.DataFrame(
+        st.session_state.rtm_result
     )
 
-    total_count = len(
-        current_cases
+    st.dataframe(
+        rtm_dataframe,
+        width="stretch",
+        hide_index=True,
     )
 
-    p0_count = sum(
-        case.get(
-            "priority"
-        ) == "P0"
-        for case in current_cases
-    )
-
-    p1_count = sum(
-        case.get(
-            "priority"
-        ) == "P1"
-        for case in current_cases
-    )
-
-    p2_count = sum(
-        case.get(
-            "priority"
-        ) == "P2"
-        for case in current_cases
-    )
-
-    total_requirements = len(
-        rtm_result
-    )
-
-    covered_count = sum(
-        item.get(
+    covered = sum(
+        1
+        for item in st.session_state.rtm_result
+        if item.get(
             "coverage_status"
         ) == "已覆盖"
-        for item in rtm_result
     )
 
-    partial_count = sum(
-        item.get(
+    partial = sum(
+        1
+        for item in st.session_state.rtm_result
+        if item.get(
             "coverage_status"
         ) == "部分覆盖"
-        for item in rtm_result
     )
 
-    uncovered_count = sum(
-        item.get(
+    uncovered = sum(
+        1
+        for item in st.session_state.rtm_result
+        if item.get(
             "coverage_status"
         ) == "未覆盖"
-        for item in rtm_result
     )
 
-    if total_requirements:
-
-        coverage_rate = round(
-            covered_count
-            / total_requirements
-            * 100,
-            1
-        )
-
-    else:
-
-        coverage_rate = 0
-
-    if quality_result:
-
-        overall_score = int(
-            quality_result.get(
-                "overall_score",
-                0
-            )
-        )
-
-        high_risk_gaps = (
-            quality_result.get(
-                "high_risk_gaps",
-                []
-            )
-        )
-
-        duplicate_risks = (
-            quality_result.get(
-                "duplicate_risks",
-                []
-            )
-        )
-
-    else:
-
-        overall_score = 0
-
-        high_risk_gaps = []
-
-        duplicate_risks = []
-
-    dashboard1, dashboard2, dashboard3, dashboard4 = (
-        st.columns(4)
+    rtm_col1, rtm_col2, rtm_col3 = (
+        st.columns(3)
     )
 
-    dashboard1.metric(
-        "测试用例总数",
-        total_count
+    rtm_col1.metric(
+        "已覆盖",
+        covered,
     )
 
-    dashboard2.metric(
-        "总体质量分",
-        f"{overall_score}/100"
+    rtm_col2.metric(
+        "部分覆盖",
+        partial,
     )
 
-    dashboard3.metric(
-        "需求完全覆盖率",
-        f"{coverage_rate}%"
+    rtm_col3.metric(
+        "未覆盖",
+        uncovered,
     )
 
-    dashboard4.metric(
-        "未覆盖需求",
-        uncovered_count
-    )
 
-    dashboard5, dashboard6, dashboard7, dashboard8 = (
-        st.columns(4)
-    )
+# =========================================================
+# 16. Excel 导出
+# =========================================================
 
-    dashboard5.metric(
-        "P0 核心用例",
-        p0_count
-    )
-
-    dashboard6.metric(
-        "部分覆盖需求",
-        partial_count
-    )
-
-    dashboard7.metric(
-        "高风险遗漏",
-        len(
-            high_risk_gaps
-        )
-    )
-
-    dashboard8.metric(
-        "重复风险",
-        len(
-            duplicate_risks
-        )
-    )
-
-    if (
-        overall_score >= 90
-        and coverage_rate >= 95
-        and uncovered_count == 0
-    ):
-
-        st.success(
-            "✅ 当前测试设计质量较高，可进入最终人工评审。"
-        )
-
-    elif (
-        overall_score >= 75
-        and coverage_rate >= 80
-    ):
-
-        st.warning(
-            "⚠️ 当前测试设计基本可用，建议继续处理遗漏和高风险场景。"
-        )
-
-    else:
-
-        st.info(
-            "完成质量评估和需求追踪后，可获得更完整的测试质量判断。"
-        )
-
-    # =====================================================
-    # 21. 导出
-    # =====================================================
+if st.session_state.test_cases:
 
     st.markdown(
-        '<div class="section-title">'
-        '⑧ 导出测试结果'
-        '</div>',
-        unsafe_allow_html=True
+        '<div class="section-title">⑧ 测试结果导出</div>',
+        unsafe_allow_html=True,
     )
 
-    excel_file = create_excel(
-        normalize_case_ids(
-            current_cases
-        ),
-        rtm_result
-    )
+    try:
 
-    export_col1, export_col2 = (
-        st.columns(
-            [
-                1,
-                4
-            ]
+        excel_data = (
+            create_test_result_excel(
+                st.session_state.test_cases,
+                st.session_state.rtm_result,
+            )
         )
-    )
 
-    with export_col1:
+        timestamp = datetime.now().strftime(
+            "%Y%m%d_%H%M%S"
+        )
 
         st.download_button(
-            "⬇️ 下载测试结果",
-            data=excel_file,
-            file_name="AI测试结果.xlsx",
-            mime=(
-                "application/"
-                "vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
+            label="📥 下载测试用例 Excel",
+            data=excel_data,
+            file_name=(
+                f"AI测试用例_{timestamp}.xlsx"
             ),
-            type="primary",
-            use_container_width=True
+            mime=(
+                "application/vnd.openxmlformats-"
+                "officedocument.spreadsheetml.sheet"
+            ),
+            width="stretch",
+        )
+
+    except Exception as e:
+
+        st.error(
+            f"Excel 生成失败：{e}"
         )
 
 
 # =========================================================
-# 22. Bug 分析
+# 17. Bug AI 分析
 # =========================================================
 
 st.divider()
 
 st.markdown(
-    '<div class="section-title">'
-    '⑨ Bug 智能分析'
-    '</div>',
-    unsafe_allow_html=True
+    '<div class="section-title">⑨ Bug AI 分析与知识沉淀</div>',
+    unsafe_allow_html=True,
 )
 
 st.markdown(
-    '<div class="section-desc">'
-    '分析实际测试缺陷，并将有效经验沉淀到测试知识库。'
-    '</div>',
-    unsafe_allow_html=True
+    """
+<div class="section-desc">
+分析 Bug 可能原因、定位方向、测试遗漏及回归测试点，
+并可将确认后的历史 Bug 保存到 RAG 知识库。
+</div>
+""",
+    unsafe_allow_html=True,
 )
 
-with st.container(
-    border=True
+bug_col1, bug_col2 = st.columns(
+    2
+)
+
+with bug_col1:
+
+    bug_title = st.text_input(
+        "Bug 标题",
+        placeholder="例如：登录接口连续输错密码未限制",
+    )
+
+    bug_description = st.text_area(
+        "Bug 描述",
+        height=130,
+    )
+
+    bug_steps = st.text_area(
+        "复现步骤",
+        height=150,
+    )
+
+with bug_col2:
+
+    bug_expected = st.text_area(
+        "预期结果",
+        height=100,
+    )
+
+    bug_actual = st.text_area(
+        "实际结果",
+        height=100,
+    )
+
+    bug_environment = st.text_area(
+        "测试环境",
+        height=100,
+        placeholder=(
+            "例如：Android 14 / 测试环境 / "
+            "APP 版本 1.2.0"
+        ),
+    )
+
+
+if st.button(
+    "🤖 AI 分析 Bug",
+    width="stretch",
 ):
-
-    bug_col1, bug_col2 = (
-        st.columns(2)
-    )
-
-    with bug_col1:
-
-        bug_title = st.text_input(
-            "Bug 标题",
-            placeholder="例如：连续输错5次密码后账号未锁定"
-        )
-
-        bug_description = st.text_area(
-            "Bug 描述",
-            height=120
-        )
-
-        bug_environment = st.text_input(
-            "测试环境",
-            placeholder="例如：Android 14 / 测试环境"
-        )
-
-    with bug_col2:
-
-        bug_steps = st.text_area(
-            "复现步骤",
-            height=120
-        )
-
-        bug_expected = st.text_area(
-            "预期结果",
-            height=90
-        )
-
-        bug_actual = st.text_area(
-            "实际结果",
-            height=90
-        )
-
-    bug_btn_col1, bug_btn_col2 = (
-        st.columns(
-            [
-                1,
-                4
-            ]
-        )
-    )
-
-    with bug_btn_col1:
-
-        analyze_bug = st.button(
-            "🔍 开始 Bug 分析",
-            type="primary",
-            use_container_width=True
-        )
-
-
-if analyze_bug:
 
     if not (
         bug_title.strip()
@@ -2702,64 +1507,63 @@ if analyze_bug:
     ):
 
         st.warning(
-            "请至少填写 Bug 标题或 Bug 描述。"
+            "请至少填写 Bug 标题或 Bug 描述"
         )
 
     else:
 
-        bug_prompt = build_bug_analysis_prompt(
-            bug_title,
-            bug_description,
-            bug_steps,
-            bug_expected,
-            bug_actual,
-            bug_environment
-        )
-
         try:
 
             with st.spinner(
-                "正在分析 Bug..."
+                "AI 正在分析 Bug..."
             ):
 
-                response = (
-                    model.invoke(
-                        bug_prompt
+                prompt = (
+                    build_bug_analysis_prompt(
+                        bug_title,
+                        bug_description,
+                        bug_steps,
+                        bug_expected,
+                        bug_actual,
+                        bug_environment,
                     )
                 )
 
-            bug_analysis = (
-                parse_json_dict(
-                    response.content
+                bug_content = invoke_model(
+                    prompt
                 )
+
+                bug_analysis = (
+                    parse_json_dict(
+                        bug_content
+                    )
+                )
+
+                if not bug_analysis:
+
+                    raise ValueError(
+                        "Bug 分析结果无法解析"
+                    )
+
+                st.session_state[
+                    "bug_analysis"
+                ] = bug_analysis
+
+            st.success(
+                "Bug 分析完成"
             )
 
         except Exception as e:
-
-            bug_analysis = None
 
             st.error(
                 f"Bug 分析失败：{e}"
             )
 
-        if bug_analysis:
 
-            st.session_state[
-                "bug_analysis"
-            ] = bug_analysis
+if st.session_state.bug_analysis:
 
-
-bug_analysis = (
-    st.session_state[
-        "bug_analysis"
-    ]
-)
-
-
-if bug_analysis:
-
-    st.markdown(
-        "### Bug 分析结果"
+    analysis = (
+        st.session_state.bug_analysis
     )
 
     bug_metric1, bug_metric2, bug_metric3 = (
@@ -2768,247 +1572,115 @@ if bug_analysis:
 
     bug_metric1.metric(
         "严重程度",
-        bug_analysis.get(
+        analysis.get(
             "severity",
-            "-"
-        )
+            "-",
+        ),
     )
 
     bug_metric2.metric(
         "优先级",
-        bug_analysis.get(
+        analysis.get(
             "priority",
-            "-"
-        )
+            "-",
+        ),
     )
 
     bug_metric3.metric(
         "Bug 类型",
-        bug_analysis.get(
+        analysis.get(
             "bug_type",
-            "-"
-        )
-    )
-
-    bug_tab1, bug_tab2, bug_tab3, bug_tab4 = (
-        st.tabs(
-            [
-                "🔍 可能原因",
-                "🛠 定位建议",
-                "⚠️ 测试遗漏",
-                "🔁 回归测试"
-            ]
-        )
-    )
-
-    with bug_tab1:
-
-        for item in bug_analysis.get(
-            "root_causes",
-            []
-        ):
-
-            st.write(
-                f"• {item}"
-            )
-
-    with bug_tab2:
-
-        for index, item in enumerate(
-            bug_analysis.get(
-                "localization_steps",
-                []
-            ),
-            start=1
-        ):
-
-            st.write(
-                f"{index}. {item}"
-            )
-
-    with bug_tab3:
-
-        for item in bug_analysis.get(
-            "test_gaps",
-            []
-        ):
-
-            st.write(
-                f"• {item}"
-            )
-
-    with bug_tab4:
-
-        for item in bug_analysis.get(
-            "regression_points",
-            []
-        ):
-
-            st.write(
-                f"• {item}"
-            )
-
-    knowledge_summary = st.text_area(
-        "知识库摘要",
-        value=bug_analysis.get(
-            "knowledge_summary",
-            ""
+            "-",
         ),
-        height=150,
-        key="knowledge_summary_editor"
     )
 
-    if st.button(
-        "📚 保存到历史 Bug 知识库"
+    with st.expander(
+        "查看完整 Bug 分析",
+        expanded=True,
     ):
 
-        try:
-
-            timestamp = (
-                datetime.now().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-            )
-
-            record = f"""
-
-==================================================
-历史 Bug
-==================================================
-
-记录时间：
-{timestamp}
-
-Bug标题：
-{bug_title}
-
-Bug描述：
-{bug_description}
-
-复现步骤：
-{bug_steps}
-
-预期结果：
-{bug_expected}
-
-实际结果：
-{bug_actual}
-
-测试环境：
-{bug_environment}
-
-严重程度：
-{bug_analysis.get("severity", "")}
-
-优先级：
-{bug_analysis.get("priority", "")}
-
-Bug类型：
-{bug_analysis.get("bug_type", "")}
-
-可能原因：
-{chr(10).join("- " + str(item) for item in bug_analysis.get("root_causes", []))}
-
-测试遗漏：
-{chr(10).join("- " + str(item) for item in bug_analysis.get("test_gaps", []))}
-
-回归测试点：
-{chr(10).join("- " + str(item) for item in bug_analysis.get("regression_points", []))}
-
-知识摘要：
-{knowledge_summary}
-
-==================================================
-
-"""
-
-            with open(
-                HISTORY_BUG_FILE,
-                "a",
-                encoding="utf-8"
-            ) as f:
-
-                f.write(
-                    record
-                )
-
-            with st.spinner(
-                "正在更新测试知识库..."
-            ):
-
-                rebuild_vector_db()
-
-            st.success(
-                "Bug 已保存到历史测试知识库。"
-            )
-
-        except Exception as e:
-
-            st.error(
-                f"保存失败：{e}"
-            )
-
-
-# =========================================================
-# 23. 清空
-# =========================================================
-
-if st.session_state[
-    "test_cases"
-]:
-
-    st.divider()
-
-    clear_col1, clear_col2 = (
-        st.columns(
-            [
-                1,
-                4
-            ]
+        st.json(
+            analysis
         )
-    )
 
-    with clear_col1:
+    if st.button(
+        "💾 保存到历史 Bug 知识库",
+        width="stretch",
+    ):
 
-        if st.button(
-            "🗑 清空当前分析",
-            use_container_width=True
-        ):
+        if not bug_title.strip():
 
-            st.session_state[
-                "test_cases"
-            ] = []
+            st.warning(
+                "保存前请填写 Bug 标题"
+            )
 
-            st.session_state[
-                "review_content"
-            ] = ""
+        else:
 
-            st.session_state[
-                "analysis_content"
-            ] = ""
+            try:
 
-            st.session_state[
-                "rag_context"
-            ] = ""
+                os.makedirs(
+                    KNOWLEDGE_DIR,
+                    exist_ok=True,
+                )
 
-            st.session_state[
-                "current_requirement"
-            ] = ""
+                root_causes = analysis.get(
+                    "root_causes",
+                    [],
+                )
 
-            st.session_state[
-                "quality_result"
-            ] = None
+                regression_points = (
+                    analysis.get(
+                        "regression_points",
+                        [],
+                    )
+                )
 
-            st.session_state[
-                "rtm_result"
-            ] = []
+                knowledge_summary = (
+                    analysis.get(
+                        "knowledge_summary",
+                        "",
+                    )
+                )
 
-            st.session_state[
-                "requirement_items"
-            ] = []
+                record = (
+                    "\n\n"
+                    "====================================\n"
+                    f"Bug标题：{bug_title}\n"
+                    f"Bug描述：{bug_description}\n"
+                    f"复现步骤：{bug_steps}\n"
+                    f"预期结果：{bug_expected}\n"
+                    f"实际结果：{bug_actual}\n"
+                    f"测试环境：{bug_environment}\n"
+                    f"严重程度：{analysis.get('severity', '')}\n"
+                    f"优先级：{analysis.get('priority', '')}\n"
+                    f"Bug类型：{analysis.get('bug_type', '')}\n"
+                    f"所属模块：{analysis.get('module', '')}\n"
+                    f"可能原因：{json.dumps(root_causes, ensure_ascii=False)}\n"
+                    f"回归测试点：{json.dumps(regression_points, ensure_ascii=False)}\n"
+                    f"知识摘要：{knowledge_summary}\n"
+                    "====================================\n"
+                )
 
-            st.session_state[
-                "bug_analysis"
-            ] = None
+                with open(
+                    HISTORY_BUG_FILE,
+                    "a",
+                    encoding="utf-8",
+                ) as file:
 
-            st.rerun()
+                    file.write(record)
+
+                with st.spinner(
+                    "正在重新构建 RAG..."
+                ):
+
+                    rebuild_vector_db()
+
+                st.success(
+                    "Bug 已保存到历史知识库，并完成 RAG 重建"
+                )
+
+            except Exception as e:
+
+                st.error(
+                    f"Bug 保存失败：{e}"
+                )

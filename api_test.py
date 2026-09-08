@@ -3,18 +3,29 @@ import json
 import pandas as pd
 import streamlit as st
 
-try:
-    from json_repair import repair_json
-except ImportError:
-    repair_json = None
-
 from services.model_factory import get_model
 
 from prompts.api_prompts import (
     build_api_analysis_prompt,
     build_api_test_point_prompt,
     build_api_case_prompt,
-    build_pytest_script_prompt
+    build_pytest_script_prompt,
+)
+
+from utils.json_utils import (
+    parse_json_list,
+    clean_python_code,
+)
+
+from utils.case_utils import (
+    normalize_case_ids,
+    api_cases_to_dataframe,
+    dataframe_to_api_cases,
+)
+
+from utils.validation_utils import (
+    normalize_api_cases,
+    validate_api_cases,
 )
 
 
@@ -26,7 +37,7 @@ st.set_page_config(
     page_title="AI 接口测试助手",
     page_icon="🔌",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 
@@ -145,7 +156,7 @@ textarea {
 
 </style>
 """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 
@@ -169,358 +180,59 @@ except Exception as e:
 # 4. Session State
 # =========================================================
 
-default_states = {
+DEFAULT_STATES = {
     "api_analysis": "",
     "api_test_points": "",
     "api_cases": [],
-    "pytest_script": ""
+    "pytest_script": "",
+    "api_validation_result": None,
 }
 
-for key, value in default_states.items():
+for key, value in DEFAULT_STATES.items():
 
     if key not in st.session_state:
         st.session_state[key] = value
 
 
 # =========================================================
-# 5. JSON 工具
+# 5. 通用方法
 # =========================================================
 
-def clean_json_text(content):
+def invoke_model(prompt):
 
-    if not content:
-        return ""
-
-    content = content.strip()
-
-    if content.startswith("```json"):
-        content = content[len("```json"):].strip()
-
-    elif content.startswith("```"):
-        content = content[3:].strip()
-
-    if content.endswith("```"):
-        content = content[:-3].strip()
-
-    return content
-
-
-def parse_json_list(content):
-
-    cleaned = clean_json_text(
-        content
+    response = model.invoke(
+        prompt
     )
 
-    # =====================================================
-    # 第一次：直接解析
-    # =====================================================
-
-    try:
-
-        result = json.loads(
-            cleaned
-        )
-
-        if isinstance(
-            result,
-            list
-        ):
-            return result
-
-    except Exception:
-        pass
-
-    # =====================================================
-    # 第二次：提取 [...]
-    # =====================================================
-
-    start = cleaned.find(
-        "["
+    content = getattr(
+        response,
+        "content",
+        response,
     )
 
-    end = cleaned.rfind(
-        "]"
-    )
-
-    if (
-        start != -1
-        and end != -1
-        and end > start
-    ):
-
-        json_part = cleaned[
-            start:end + 1
-        ]
-
-        try:
-
-            result = json.loads(
-                json_part
-            )
-
-            if isinstance(
-                result,
-                list
-            ):
-                return result
-
-        except Exception:
-            pass
-
-    # =====================================================
-    # 第三次：json-repair
-    # =====================================================
-
-    if repair_json:
-
-        try:
-
-            repaired = repair_json(
-                cleaned
-            )
-
-            result = json.loads(
-                repaired
-            )
-
-            if isinstance(
-                result,
-                list
-            ):
-                return result
-
-        except Exception:
-            pass
-
-    return None
+    return str(content)
 
 
-def clean_python_code(content):
+def reset_api_state():
 
-    if not content:
-        return ""
-
-    content = content.strip()
-
-    if content.startswith("```python"):
-
-        content = content[
-            len("```python"):
-        ].strip()
-
-    elif content.startswith("```"):
-
-        content = content[
-            3:
-        ].strip()
-
-    if content.endswith("```"):
-
-        content = content[
-            :-3
-        ].strip()
-
-    return content
+    st.session_state.api_analysis = ""
+    st.session_state.api_test_points = ""
+    st.session_state.api_cases = []
+    st.session_state.pytest_script = ""
+    st.session_state.api_validation_result = None
 
 
-# =========================================================
-# 6. 接口用例编号
-# =========================================================
+def refresh_validation():
 
-def normalize_api_case_ids(
-    api_cases
-):
-
-    for index, case in enumerate(
-        api_cases,
-        start=1
-    ):
-
-        case[
-            "case_id"
-        ] = f"API{index:03d}"
-
-    return api_cases
-
-
-# =========================================================
-# 7. DataFrame 转换
-# =========================================================
-
-def api_cases_to_dataframe(
-    api_cases
-):
-
-    rows = []
-
-    for case in api_cases:
-
-        rows.append(
-            {
-                "用例编号":
-                    case.get(
-                        "case_id",
-                        ""
-                    ),
-
-                "测试模块":
-                    case.get(
-                        "module",
-                        ""
-                    ),
-
-                "测试标题":
-                    case.get(
-                        "title",
-                        ""
-                    ),
-
-                "请求方式":
-                    case.get(
-                        "method",
-                        ""
-                    ),
-
-                "URL":
-                    case.get(
-                        "url",
-                        ""
-                    ),
-
-                "Headers":
-                    case.get(
-                        "headers",
-                        ""
-                    ),
-
-                "请求数据":
-                    case.get(
-                        "request_data",
-                        ""
-                    ),
-
-                "预期HTTP状态码":
-                    case.get(
-                        "expected_http_status",
-                        ""
-                    ),
-
-                "预期业务结果":
-                    case.get(
-                        "expected_business_result",
-                        ""
-                    ),
-
-                "优先级":
-                    case.get(
-                        "priority",
-                        ""
-                    )
-            }
-        )
-
-    return pd.DataFrame(
-        rows
+    st.session_state[
+        "api_validation_result"
+    ] = validate_api_cases(
+        st.session_state.api_cases
     )
 
 
-def dataframe_to_api_cases(
-    dataframe
-):
-
-    cases = []
-
-    for _, row in dataframe.iterrows():
-
-        cases.append(
-            {
-                "case_id":
-                    str(
-                        row.get(
-                            "用例编号",
-                            ""
-                        )
-                    ),
-
-                "module":
-                    str(
-                        row.get(
-                            "测试模块",
-                            ""
-                        )
-                    ),
-
-                "title":
-                    str(
-                        row.get(
-                            "测试标题",
-                            ""
-                        )
-                    ),
-
-                "method":
-                    str(
-                        row.get(
-                            "请求方式",
-                            ""
-                        )
-                    ),
-
-                "url":
-                    str(
-                        row.get(
-                            "URL",
-                            ""
-                        )
-                    ),
-
-                "headers":
-                    str(
-                        row.get(
-                            "Headers",
-                            ""
-                        )
-                    ),
-
-                "request_data":
-                    str(
-                        row.get(
-                            "请求数据",
-                            ""
-                        )
-                    ),
-
-                "expected_http_status":
-                    str(
-                        row.get(
-                            "预期HTTP状态码",
-                            ""
-                        )
-                    ),
-
-                "expected_business_result":
-                    str(
-                        row.get(
-                            "预期业务结果",
-                            ""
-                        )
-                    ),
-
-                "priority":
-                    str(
-                        row.get(
-                            "优先级",
-                            ""
-                        )
-                    )
-            }
-        )
-
-    return cases
-
-
 # =========================================================
-# 8. Sidebar
+# 6. Sidebar
 # =========================================================
 
 with st.sidebar:
@@ -535,14 +247,8 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown(
-        "### 📊 当前状态"
-    )
-
     current_api_cases = (
-        st.session_state[
-            "api_cases"
-        ]
+        st.session_state.api_cases
     )
 
     total_count = len(
@@ -570,62 +276,114 @@ with st.sidebar:
         for case in current_api_cases
     )
 
-    side1, side2 = st.columns(
-        2
+    st.markdown(
+        "### 📊 当前状态"
     )
+
+    side1, side2 = st.columns(2)
 
     side1.metric(
         "用例",
-        total_count
+        total_count,
     )
 
     side2.metric(
         "P0",
-        p0_count
+        p0_count,
     )
 
-    side3, side4 = st.columns(
-        2
-    )
+    side3, side4 = st.columns(2)
 
     side3.metric(
         "P1",
-        p1_count
+        p1_count,
     )
 
     side4.metric(
         "P2",
-        p2_count
+        p2_count,
     )
+
+    validation = (
+        st.session_state.api_validation_result
+    )
+
+    if validation:
+
+        st.divider()
+
+        st.markdown(
+            "### 🛡 输出校验"
+        )
+
+        col_valid, col_invalid = (
+            st.columns(2)
+        )
+
+        col_valid.metric(
+            "有效",
+            validation.get(
+                "valid",
+                0,
+            ),
+        )
+
+        col_invalid.metric(
+            "异常",
+            validation.get(
+                "invalid",
+                0,
+            ),
+        )
+
+        if (
+            validation.get(
+                "error_count",
+                0,
+            )
+            > 0
+        ):
+
+            st.error(
+                f"发现 "
+                f"{validation['error_count']} "
+                f"个输出错误"
+            )
+
+        elif (
+            validation.get(
+                "warning_count",
+                0,
+            )
+            > 0
+        ):
+
+            st.warning(
+                f"发现 "
+                f"{validation['warning_count']} "
+                f"个风险提示"
+            )
+
+        else:
+
+            st.success(
+                "AI 输出结构校验通过"
+            )
 
     st.divider()
 
     if st.button(
         "🗑 清空当前接口分析",
-        width="stretch"
+        width="stretch",
     ):
 
-        st.session_state[
-            "api_analysis"
-        ] = ""
-
-        st.session_state[
-            "api_test_points"
-        ] = ""
-
-        st.session_state[
-            "api_cases"
-        ] = []
-
-        st.session_state[
-            "pytest_script"
-        ] = ""
+        reset_api_state()
 
         st.rerun()
 
 
 # =========================================================
-# 9. Hero
+# 7. Hero
 # =========================================================
 
 st.markdown(
@@ -638,39 +396,31 @@ st.markdown(
 
 <div class="hero-description">
 输入接口信息后，自动完成接口分析、测试点设计、
-接口测试用例生成以及 Pytest + Requests 自动化脚本生成。
+接口测试用例生成、AI 输出校验以及 Pytest 自动化脚本生成。
 </div>
 
 <span class="feature-chip">接口分析</span>
-<span class="feature-chip">参数校验</span>
-<span class="feature-chip">异常场景</span>
+<span class="feature-chip">测试点</span>
 <span class="feature-chip">接口用例</span>
+<span class="feature-chip">输出校验</span>
 <span class="feature-chip">Pytest</span>
 
 </div>
 """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 
 # =========================================================
-# 10. 接口输入
+# 8. 接口输入
 # =========================================================
 
 st.markdown(
     '<div class="section-title">'
     '① 接口信息'
     '</div>',
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
-
-st.markdown(
-    '<div class="section-desc">'
-    '填写接口基本信息和请求响应示例。'
-    '</div>',
-    unsafe_allow_html=True
-)
-
 
 with st.container(
     border=True
@@ -684,7 +434,7 @@ with st.container(
 
         api_name = st.text_input(
             "接口名称",
-            placeholder="例如：用户登录接口"
+            placeholder="例如：用户登录接口",
         )
 
         request_method = st.selectbox(
@@ -694,34 +444,23 @@ with st.container(
                 "POST",
                 "PUT",
                 "PATCH",
-                "DELETE"
-            ]
+                "DELETE",
+            ],
         )
 
     with base_col2:
 
         api_url = st.text_input(
             "接口 URL",
-            placeholder="https://api.example.com/login"
+            placeholder=(
+                "https://api.example.com/v1/login"
+            ),
         )
 
         api_description = st.text_area(
             "接口需求",
-            height=110,
-            placeholder="""
-例如：
-
-用户通过手机号和密码进行登录。
-手机号不能为空。
-密码不能为空。
-登录成功返回 token。
-"""
+            height=150,
         )
-
-
-    st.markdown(
-        "#### 请求信息"
-    )
 
     request_col1, request_col2 = (
         st.columns(2)
@@ -734,7 +473,7 @@ with st.container(
             height=160,
             value="""{
     "Content-Type": "application/json"
-}"""
+}""",
         )
 
     with request_col2:
@@ -745,13 +484,8 @@ with st.container(
             value="""{
     "phone": "13800138000",
     "password": "123456"
-}"""
+}""",
         )
-
-
-    st.markdown(
-        "#### 响应示例"
-    )
 
     response_col1, response_col2 = (
         st.columns(2)
@@ -763,13 +497,6 @@ with st.container(
             st.text_area(
                 "成功响应示例",
                 height=180,
-                value="""{
-    "code": 0,
-    "message": "success",
-    "data": {
-        "token": "example_token"
-    }
-}"""
             )
         )
 
@@ -779,430 +506,283 @@ with st.container(
             st.text_area(
                 "异常响应示例",
                 height=180,
-                value="""{
-    "code": 1001,
-    "message": "手机号或密码错误"
-}"""
             )
         )
 
 
-    start_col1, start_col2 = (
-        st.columns(
-            [
-                1,
-                4
-            ]
-        )
-    )
-
-    with start_col1:
-
-        start_analysis = st.button(
-            "🚀 开始接口测试分析",
-            type="primary",
-            width="stretch"
-        )
-
-    with start_col2:
-
-        st.caption(
-            "系统将执行：接口分析 → 测试点 → 接口测试用例"
-        )
-
-
 # =========================================================
-# 11. 主分析流程
+# 9. AI 接口测试分析
 # =========================================================
 
-if start_analysis:
+st.markdown(
+    '<div class="section-title">'
+    '② AI 接口测试分析'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+if st.button(
+    "🚀 开始接口测试分析",
+    type="primary",
+    width="stretch",
+):
 
     if not api_name.strip():
 
         st.warning(
-            "请填写接口名称。"
+            "请填写接口名称"
         )
 
-        st.stop()
-
-    if not api_url.strip():
+    elif not api_url.strip():
 
         st.warning(
-            "请填写接口 URL。"
+            "请填写接口 URL"
         )
 
-        st.stop()
+    else:
 
-    # =====================================================
-    # 接口分析
-    # =====================================================
+        reset_api_state()
 
-    analysis_prompt = (
-        build_api_analysis_prompt(
-            api_name,
-            request_method,
-            api_url,
-            api_description,
-            headers_text,
-            request_body,
-            success_response,
-            error_response
-        )
-    )
+        try:
 
-    try:
+            with st.status(
+                "正在执行接口测试分析...",
+                expanded=True,
+            ) as status:
 
-        with st.spinner(
-            "正在分析接口..."
-        ):
+                st.write(
+                    "① 正在分析接口..."
+                )
 
-            analysis_response = (
-                model.invoke(
+                analysis_prompt = (
+                    build_api_analysis_prompt(
+                        api_name,
+                        request_method,
+                        api_url,
+                        api_description,
+                        headers_text,
+                        request_body,
+                        success_response,
+                        error_response,
+                    )
+                )
+
+                api_analysis = invoke_model(
                     analysis_prompt
                 )
-            )
 
-    except Exception as e:
+                st.session_state.api_analysis = (
+                    api_analysis
+                )
 
-        st.error(
-            f"接口分析失败：{e}"
-        )
+                st.write(
+                    "② 正在生成接口测试点..."
+                )
 
-        st.stop()
+                point_prompt = (
+                    build_api_test_point_prompt(
+                        api_name,
+                        request_method,
+                        api_url,
+                        api_description,
+                        api_analysis,
+                    )
+                )
 
-    api_analysis = (
-        analysis_response.content
-    )
-
-    st.session_state[
-        "api_analysis"
-    ] = api_analysis
-
-
-    # =====================================================
-    # 测试点
-    # =====================================================
-
-    point_prompt = (
-        build_api_test_point_prompt(
-            api_name,
-            request_method,
-            api_url,
-            api_description,
-            api_analysis
-        )
-    )
-
-    try:
-
-        with st.spinner(
-            "正在生成接口测试点..."
-        ):
-
-            point_response = (
-                model.invoke(
+                points = invoke_model(
                     point_prompt
                 )
-            )
 
-    except Exception as e:
+                st.session_state.api_test_points = (
+                    points
+                )
 
-        st.error(
-            f"接口测试点生成失败：{e}"
-        )
+                st.write(
+                    "③ 正在生成接口测试用例..."
+                )
 
-        st.stop()
+                case_prompt = (
+                    build_api_case_prompt(
+                        api_name,
+                        request_method,
+                        api_url,
+                        api_description,
+                        headers_text,
+                        request_body,
+                        success_response,
+                        error_response,
+                        points,
+                    )
+                )
 
-    api_test_points = (
-        point_response.content
-    )
-
-    st.session_state[
-        "api_test_points"
-    ] = api_test_points
-
-
-    # =====================================================
-    # 接口测试用例
-    # =====================================================
-
-    case_prompt = (
-        build_api_case_prompt(
-            api_name,
-            request_method,
-            api_url,
-            api_description,
-            headers_text,
-            request_body,
-            success_response,
-            error_response,
-            api_test_points
-        )
-    )
-
-    try:
-
-        with st.spinner(
-            "正在生成接口测试用例..."
-        ):
-
-            case_response = (
-                model.invoke(
+                case_content = invoke_model(
                     case_prompt
                 )
+
+                api_cases = parse_json_list(
+                    case_content
+                )
+
+                if not api_cases:
+
+                    raise ValueError(
+                        "AI 返回的接口测试用例无法解析为 JSON"
+                    )
+
+                api_cases = (
+                    normalize_api_cases(
+                        api_cases
+                    )
+                )
+
+                api_cases = (
+                    normalize_case_ids(
+                        api_cases,
+                        prefix="API",
+                    )
+                )
+
+                st.session_state.api_cases = (
+                    api_cases
+                )
+
+                refresh_validation()
+
+                status.update(
+                    label="接口测试分析完成",
+                    state="complete",
+                    expanded=False,
+                )
+
+            st.rerun()
+
+        except Exception as e:
+
+            st.error(
+                f"接口测试分析失败：{e}"
             )
-
-    except Exception as e:
-
-        st.error(
-            f"接口测试用例生成失败：{e}"
-        )
-
-        st.stop()
-
-    api_cases = (
-        parse_json_list(
-            case_response.content
-        )
-    )
-
-    if api_cases is None:
-
-        st.error(
-            "接口测试用例 JSON 解析失败。"
-        )
-
-        with st.expander(
-            "查看 AI 原始返回"
-        ):
-
-            st.code(
-                case_response.content
-            )
-
-        st.stop()
-
-    api_cases = (
-        normalize_api_case_ids(
-            api_cases
-        )
-    )
-
-    st.session_state[
-        "api_cases"
-    ] = api_cases
-
-    st.session_state[
-        "pytest_script"
-    ] = ""
-
-    st.success(
-        f"分析完成，共生成 {len(api_cases)} 条接口测试用例。"
-    )
 
 
 # =========================================================
-# 12. 分析结果
+# 10. AI 分析结果
 # =========================================================
 
 if (
-    st.session_state[
-        "api_analysis"
-    ]
-    or st.session_state[
-        "api_test_points"
-    ]
+    st.session_state.api_analysis
+    or st.session_state.api_test_points
 ):
 
-    st.divider()
-
     st.markdown(
         '<div class="section-title">'
-        '② 接口分析结果'
+        '③ AI 分析结果'
         '</div>',
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
-    analysis_tab, point_tab = (
-        st.tabs(
-            [
-                "📋 接口分析",
-                "🎯 接口测试点"
-            ]
-        )
+    tab1, tab2 = st.tabs(
+        [
+            "接口分析",
+            "测试点",
+        ]
     )
 
-    with analysis_tab:
+    with tab1:
 
         st.markdown(
-            st.session_state[
-                "api_analysis"
-            ]
+            st.session_state.api_analysis
         )
 
-    with point_tab:
+    with tab2:
 
         st.markdown(
-            st.session_state[
-                "api_test_points"
-            ]
+            st.session_state.api_test_points
         )
 
 
 # =========================================================
-# 13. 测试用例
+# 11. 接口测试用例
 # =========================================================
 
-if st.session_state[
-    "api_cases"
-]:
-
-    st.divider()
+if st.session_state.api_cases:
 
     st.markdown(
         '<div class="section-title">'
-        '③ 接口测试用例'
+        '④ 接口测试用例'
         '</div>',
-        unsafe_allow_html=True
-    )
-
-    st.caption(
-        "支持在表格中直接修改、新增或删除接口用例。"
-    )
-
-    dataframe = (
-        api_cases_to_dataframe(
-            st.session_state[
-                "api_cases"
-            ]
-        )
-    )
-
-    edited_df = st.data_editor(
-        dataframe,
-        width="stretch",
-        hide_index=True,
-        num_rows="dynamic",
-        height=500,
-        key="api_case_editor",
-        column_config={
-            "用例编号":
-                st.column_config.TextColumn(
-                    "用例编号",
-                    width="small"
-                ),
-
-            "测试标题":
-                st.column_config.TextColumn(
-                    "测试标题",
-                    width="large"
-                ),
-
-            "请求方式":
-                st.column_config.SelectboxColumn(
-                    "请求方式",
-                    options=[
-                        "GET",
-                        "POST",
-                        "PUT",
-                        "PATCH",
-                        "DELETE"
-                    ]
-                ),
-
-            "优先级":
-                st.column_config.SelectboxColumn(
-                    "优先级",
-                    options=[
-                        "P0",
-                        "P1",
-                        "P2"
-                    ],
-                    width="small"
-                )
-        }
+        unsafe_allow_html=True,
     )
 
     current_cases = (
+        normalize_case_ids(
+            st.session_state.api_cases,
+            prefix="API",
+        )
+    )
+
+    case_dataframe = (
+        api_cases_to_dataframe(
+            current_cases
+        )
+    )
+
+    edited_dataframe = st.data_editor(
+        case_dataframe,
+        width="stretch",
+        hide_index=True,
+        num_rows="dynamic",
+        key="api_case_editor",
+    )
+
+    edited_cases = (
         dataframe_to_api_cases(
-            edited_df
+            edited_dataframe
         )
     )
 
-
-    save_col1, save_col2 = (
-        st.columns(
-            [
-                1,
-                4
-            ]
+    edited_cases = (
+        normalize_api_cases(
+            edited_cases
         )
     )
 
-    with save_col1:
-
-        save_cases = st.button(
-            "💾 保存接口用例修改",
-            width="stretch"
+    edited_cases = (
+        normalize_case_ids(
+            edited_cases,
+            prefix="API",
         )
-
-    if save_cases:
-
-        current_cases = (
-            normalize_api_case_ids(
-                current_cases
-            )
-        )
-
-        st.session_state[
-            "api_cases"
-        ] = current_cases
-
-        st.session_state[
-            "pytest_script"
-        ] = ""
-
-        st.success(
-            "接口测试用例修改已保存。"
-        )
-
-        st.rerun()
-
-
-    # =====================================================
-    # 用例统计
-    # =====================================================
-
-    st.markdown(
-        '<div class="section-title">'
-        '④ 用例统计'
-        '</div>',
-        unsafe_allow_html=True
     )
 
-    total_count = len(
-        current_cases
-    )
+    if (
+        edited_cases
+        != st.session_state.api_cases
+    ):
+
+        st.session_state.api_cases = (
+            edited_cases
+        )
+
+        refresh_validation()
 
     p0_count = sum(
-        case.get(
-            "priority"
-        ) == "P0"
-        for case in current_cases
+        case.get("priority") == "P0"
+        for case in edited_cases
     )
 
     p1_count = sum(
-        case.get(
-            "priority"
-        ) == "P1"
-        for case in current_cases
+        case.get("priority") == "P1"
+        for case in edited_cases
     )
 
     p2_count = sum(
-        case.get(
-            "priority"
-        ) == "P2"
-        for case in current_cases
+        case.get("priority") == "P2"
+        for case in edited_cases
+    )
+
+    unknown_priority = (
+        len(edited_cases)
+        - p0_count
+        - p1_count
+        - p2_count
     )
 
     metric1, metric2, metric3, metric4 = (
@@ -1210,89 +790,202 @@ if st.session_state[
     )
 
     metric1.metric(
-        "总用例",
-        total_count
+        "全部用例",
+        len(edited_cases),
     )
 
     metric2.metric(
         "P0",
-        p0_count
+        p0_count,
     )
 
     metric3.metric(
         "P1",
-        p1_count
+        p1_count,
     )
 
     metric4.metric(
         "P2",
-        p2_count
+        p2_count,
     )
 
+    if unknown_priority > 0:
 
-    # =====================================================
-    # 14. Pytest 自动化
-    # =====================================================
+        st.warning(
+            f"存在 {unknown_priority} 条"
+            f"优先级不规范的测试用例"
+        )
+
+
+# =========================================================
+# 12. AI 输出校验报告
+# =========================================================
+
+if st.session_state.api_validation_result:
+
+    validation = (
+        st.session_state.api_validation_result
+    )
 
     st.markdown(
         '<div class="section-title">'
-        '⑤ Pytest 自动化脚本'
+        '⑤ AI 输出质量校验'
         '</div>',
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
-    st.markdown(
-        '<div class="section-desc">'
-        '根据当前接口测试用例生成 Pytest + Requests 自动化脚本。'
-        '</div>',
-        unsafe_allow_html=True
+    validation_columns = st.columns(
+        5
     )
 
-    script_col1, script_col2 = (
-        st.columns(
-            [
-                1,
-                4
-            ]
-        )
+    validation_columns[0].metric(
+        "总用例",
+        validation.get(
+            "total",
+            0,
+        ),
     )
 
-    with script_col1:
+    validation_columns[1].metric(
+        "有效用例",
+        validation.get(
+            "valid",
+            0,
+        ),
+    )
 
-        generate_script = st.button(
-            "⚙️ 生成 Pytest 脚本",
-            type="primary",
-            width="stretch"
-        )
+    validation_columns[2].metric(
+        "异常用例",
+        validation.get(
+            "invalid",
+            0,
+        ),
+    )
 
+    validation_columns[3].metric(
+        "错误",
+        validation.get(
+            "error_count",
+            0,
+        ),
+    )
 
-    if generate_script:
+    validation_columns[4].metric(
+        "警告",
+        validation.get(
+            "warning_count",
+            0,
+        ),
+    )
 
-        script_prompt = (
-            build_pytest_script_prompt(
-                api_name,
-                request_method,
-                api_url,
-                headers_text,
-                api_description,
-                json.dumps(
-                    current_cases,
-                    ensure_ascii=False
-                )
+    issues = validation.get(
+        "issues",
+        []
+    )
+
+    if issues:
+
+        issue_dataframe = (
+            pd.DataFrame(
+                issues
             )
         )
+
+        issue_dataframe = (
+            issue_dataframe.rename(
+                columns={
+                    "case_id":
+                        "用例编号",
+
+                    "level":
+                        "级别",
+
+                    "field":
+                        "字段",
+
+                    "message":
+                        "问题说明",
+                }
+            )
+        )
+
+        st.dataframe(
+            issue_dataframe,
+            width="stretch",
+            hide_index=True,
+        )
+
+    else:
+
+        st.success(
+            "AI 输出结构校验全部通过"
+        )
+
+
+# =========================================================
+# 13. Pytest 自动化脚本
+# =========================================================
+
+if st.session_state.api_cases:
+
+    st.markdown(
+        '<div class="section-title">'
+        '⑥ Pytest 自动化脚本'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    if st.button(
+        "🐍 生成 Pytest 自动化脚本",
+        width="stretch",
+    ):
 
         try:
 
             with st.spinner(
-                "正在生成自动化测试脚本..."
+                "正在生成 Pytest 脚本..."
             ):
 
-                script_response = (
-                    model.invoke(
-                        script_prompt
+                cases_json = json.dumps(
+                    st.session_state.api_cases,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+
+                prompt = (
+                    build_pytest_script_prompt(
+                        api_name,
+                        request_method,
+                        api_url,
+                        headers_text,
+                        api_description,
+                        cases_json,
                     )
                 )
+
+                script = invoke_model(
+                    prompt
+                )
+
+                script = (
+                    clean_python_code(
+                        script
+                    )
+                )
+
+                if not script:
+
+                    raise ValueError(
+                        "AI 没有返回有效 Python 代码"
+                    )
+
+                st.session_state.pytest_script = (
+                    script
+                )
+
+            st.success(
+                "Pytest 脚本生成完成"
+            )
 
         except Exception as e:
 
@@ -1300,36 +993,18 @@ if st.session_state[
                 f"Pytest 脚本生成失败：{e}"
             )
 
-            st.stop()
 
-        pytest_script = (
-            clean_python_code(
-                script_response.content
-            )
-        )
+if st.session_state.pytest_script:
 
-        st.session_state[
-            "pytest_script"
-        ] = pytest_script
-
-
-    pytest_script = (
-        st.session_state[
-            "pytest_script"
-        ]
+    st.code(
+        st.session_state.pytest_script,
+        language="python",
     )
 
-    if pytest_script:
-
-        st.code(
-            pytest_script,
-            language="python"
-        )
-
-        st.download_button(
-            "⬇️ 下载 Pytest 自动化脚本",
-            data=pytest_script,
-            file_name="test_api.py",
-            mime="text/x-python",
-            type="primary"
-        )
+    st.download_button(
+        label="📥 下载 Pytest 脚本",
+        data=st.session_state.pytest_script,
+        file_name="test_api_generated.py",
+        mime="text/x-python",
+        width="stretch",
+    )
