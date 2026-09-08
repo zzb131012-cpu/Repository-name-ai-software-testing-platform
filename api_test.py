@@ -12,6 +12,10 @@ from prompts.api_prompts import (
     build_pytest_script_prompt,
 )
 
+from skills.api_skill import (
+    build_api_skill_context,
+)
+
 from utils.json_utils import (
     parse_json_list,
     clean_python_code,
@@ -168,11 +172,9 @@ try:
     model = get_model()
 
 except Exception as e:
-
     st.error(
         f"AI 服务初始化失败：{e}"
     )
-
     st.stop()
 
 
@@ -186,6 +188,7 @@ DEFAULT_STATES = {
     "api_cases": [],
     "pytest_script": "",
     "api_validation_result": None,
+    "api_skill_context": "",
 }
 
 for key, value in DEFAULT_STATES.items():
@@ -220,6 +223,7 @@ def reset_api_state():
     st.session_state.api_cases = []
     st.session_state.pytest_script = ""
     st.session_state.api_validation_result = None
+    st.session_state.api_skill_context = ""
 
 
 def refresh_validation():
@@ -229,6 +233,99 @@ def refresh_validation():
     ] = validate_api_cases(
         st.session_state.api_cases
     )
+
+
+def build_field_rules_from_requirement(
+    api_description
+):
+    """
+    当前阶段先使用轻量规则提取。
+
+    后续会升级成：
+    AI结构化规则提取 + Skill。
+    """
+
+    text = str(
+        api_description
+        or ""
+    )
+
+    rules = []
+
+    lower_text = text.lower()
+
+    if "phone" in lower_text:
+
+        phone_parts = []
+
+        if (
+            "必填" in text
+            or "不能为空" in text
+        ):
+            phone_parts.append(
+                "必填"
+            )
+
+        if "11位" in text:
+            phone_parts.append(
+                "11位数字"
+            )
+
+        if (
+            "以1开头" in text
+            or "1开头" in text
+        ):
+            phone_parts.append(
+                "以1开头"
+            )
+
+        rules.append(
+            {
+                "field": "phone",
+                "rule": "，".join(
+                    phone_parts
+                )
+                or "按照当前需求校验",
+            }
+        )
+
+    if "password" in lower_text:
+
+        password_parts = []
+
+        if (
+            "必填" in text
+            or "不能为空" in text
+        ):
+            password_parts.append(
+                "必填"
+            )
+
+        if (
+            "6~20" in text
+            or "6～20" in text
+            or "6-20" in text
+            or "6至20" in text
+            or "6到20" in text
+        ):
+            password_parts.append(
+                "长度6~20位"
+            )
+
+        rules.append(
+            {
+                "field":
+                    "password",
+
+                "rule":
+                    "，".join(
+                        password_parts
+                    )
+                    or "按照当前需求校验",
+            }
+        )
+
+    return rules
 
 
 # =========================================================
@@ -242,7 +339,7 @@ with st.sidebar:
     )
 
     st.caption(
-        "接口分析 · 测试设计 · 自动化脚本"
+        "接口分析 · Skill测试设计 · 自动化脚本"
     )
 
     st.divider()
@@ -370,6 +467,18 @@ with st.sidebar:
                 "AI 输出结构校验通过"
             )
 
+    if st.session_state.api_skill_context:
+
+        st.divider()
+
+        st.markdown(
+            "### 🧠 Skill 状态"
+        )
+
+        st.success(
+            "API Skill 已启用"
+        )
+
     st.divider()
 
     if st.button(
@@ -395,13 +504,15 @@ st.markdown(
 </div>
 
 <div class="hero-description">
-输入接口信息后，自动完成接口分析、测试点设计、
-接口测试用例生成、AI 输出校验以及 Pytest 自动化脚本生成。
+通过接口需求 + 测试 Skill + AI，
+完成接口分析、测试点、测试用例、
+输出校验以及 Pytest 自动化脚本生成。
 </div>
 
 <span class="feature-chip">接口分析</span>
-<span class="feature-chip">测试点</span>
-<span class="feature-chip">接口用例</span>
+<span class="feature-chip">Boundary Skill</span>
+<span class="feature-chip">Equivalence Skill</span>
+<span class="feature-chip">API Skill</span>
 <span class="feature-chip">输出校验</span>
 <span class="feature-chip">Pytest</span>
 
@@ -459,7 +570,7 @@ with st.container(
 
         api_description = st.text_area(
             "接口需求",
-            height=150,
+            height=180,
         )
 
     request_col1, request_col2 = (
@@ -511,12 +622,12 @@ with st.container(
 
 
 # =========================================================
-# 9. AI 接口测试分析
+# 9. AI接口测试分析
 # =========================================================
 
 st.markdown(
     '<div class="section-title">'
-    '② AI 接口测试分析'
+    '② AI + Skill 接口测试分析'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -546,9 +657,13 @@ if st.button(
         try:
 
             with st.status(
-                "正在执行接口测试分析...",
+                "正在执行 AI + Skill 接口测试分析...",
                 expanded=True,
             ) as status:
+
+                # =========================================
+                # 1. 接口分析
+                # =========================================
 
                 st.write(
                     "① 正在分析接口..."
@@ -575,8 +690,38 @@ if st.button(
                     api_analysis
                 )
 
+                # =========================================
+                # 2. 生成 Skill
+                # =========================================
+
                 st.write(
-                    "② 正在生成接口测试点..."
+                    "② 正在生成测试 Skill..."
+                )
+
+                field_rules = (
+                    build_field_rules_from_requirement(
+                        api_description
+                    )
+                )
+
+                skill_context = (
+                    build_api_skill_context(
+                        request_method,
+                        headers_text,
+                        field_rules,
+                    )
+                )
+
+                st.session_state[
+                    "api_skill_context"
+                ] = skill_context
+
+                # =========================================
+                # 3. 测试点
+                # =========================================
+
+                st.write(
+                    "③ 正在生成接口测试点..."
                 )
 
                 point_prompt = (
@@ -586,6 +731,7 @@ if st.button(
                         api_url,
                         api_description,
                         api_analysis,
+                        skill_context,
                     )
                 )
 
@@ -597,8 +743,12 @@ if st.button(
                     points
                 )
 
+                # =========================================
+                # 4. 测试用例
+                # =========================================
+
                 st.write(
-                    "③ 正在生成接口测试用例..."
+                    "④ 正在生成接口测试用例..."
                 )
 
                 case_prompt = (
@@ -612,6 +762,7 @@ if st.button(
                         success_response,
                         error_response,
                         points,
+                        skill_context,
                     )
                 )
 
@@ -649,7 +800,9 @@ if st.button(
                 refresh_validation()
 
                 status.update(
-                    label="接口测试分析完成",
+                    label=(
+                        "AI + Skill 接口测试分析完成"
+                    ),
                     state="complete",
                     expanded=False,
                 )
@@ -664,25 +817,27 @@ if st.button(
 
 
 # =========================================================
-# 10. AI 分析结果
+# 10. AI分析结果
 # =========================================================
 
 if (
     st.session_state.api_analysis
     or st.session_state.api_test_points
+    or st.session_state.api_skill_context
 ):
 
     st.markdown(
         '<div class="section-title">'
-        '③ AI 分析结果'
+        '③ AI + Skill 分析结果'
         '</div>',
         unsafe_allow_html=True,
     )
 
-    tab1, tab2 = st.tabs(
+    tab1, tab2, tab3 = st.tabs(
         [
             "接口分析",
             "测试点",
+            "Skill规则",
         ]
     )
 
@@ -696,6 +851,13 @@ if (
 
         st.markdown(
             st.session_state.api_test_points
+        )
+
+    with tab3:
+
+        st.code(
+            st.session_state.api_skill_context,
+            language="text",
         )
 
 
@@ -818,7 +980,7 @@ if st.session_state.api_cases:
 
 
 # =========================================================
-# 12. AI 输出校验报告
+# 12. 输出校验
 # =========================================================
 
 if st.session_state.api_validation_result:
@@ -834,8 +996,8 @@ if st.session_state.api_validation_result:
         unsafe_allow_html=True,
     )
 
-    validation_columns = st.columns(
-        5
+    validation_columns = (
+        st.columns(5)
     )
 
     validation_columns[0].metric(
@@ -923,7 +1085,7 @@ if st.session_state.api_validation_result:
 
 
 # =========================================================
-# 13. Pytest 自动化脚本
+# 13. Pytest自动化
 # =========================================================
 
 if st.session_state.api_cases:
